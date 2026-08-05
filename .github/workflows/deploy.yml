@@ -5,14 +5,21 @@
 # GitHub account. This workflow deploys with a project token instead, so
 # pushes ship without that connection.
 #
-# One-time setup:
-#   1. Railway dashboard -> Geocorelytics project -> Settings -> Tokens
-#      -> create a token scoped to the "production" environment.
-#   2. GitHub repo -> Settings -> Secrets and variables -> Actions
-#      -> New repository secret, named RAILWAY_TOKEN, pasted value.
+# One-time setup — add ONE of these as a GitHub repository secret
+# (Settings -> Secrets and variables -> Actions -> New repository secret):
 #
-# Until that secret exists the workflow skips itself rather than failing,
-# so a missing token never shows up as a red X on the commit.
+#   RAILWAY_TOKEN      a *project* token, created at
+#                      Railway -> Geocorelytics -> Settings -> Tokens,
+#                      scoped to the production environment. Preferred:
+#                      it can only touch this one project.
+#
+#   RAILWAY_API_TOKEN  an *account* token, created at
+#                      railway.com/account/tokens. Broader access; use
+#                      this if the project token gives permission errors.
+#
+# Either name works — whichever is set is passed to the CLI. Until one
+# exists the workflow skips itself rather than failing, so a missing
+# token never shows up as a red X on the commit.
 
 name: Deploy to Railway
 
@@ -33,8 +40,9 @@ jobs:
       - name: Check for deploy token
         id: guard
         run: |
-          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
-            echo "RAILWAY_TOKEN secret is not set — skipping deploy."
+          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ] && [ -z "${{ secrets.RAILWAY_API_TOKEN }}" ]; then
+            echo "No Railway token secret set — skipping deploy."
+            echo "Add RAILWAY_TOKEN (project) or RAILWAY_API_TOKEN (account)."
             echo "See the setup steps in .github/workflows/deploy.yml."
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
@@ -56,5 +64,8 @@ jobs:
       - name: Deploy
         if: steps.guard.outputs.ready == 'true'
         env:
+          # Whichever token you created is passed through; the CLI uses the
+          # one that is set. An empty var is ignored.
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: railway up --ci --service Geocorelytics --message "${{ github.event.head_commit.message || 'manual deploy' }}"
