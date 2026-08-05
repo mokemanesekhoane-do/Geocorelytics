@@ -572,16 +572,29 @@ app.delete('/api/logs/:id', writeRoles, (req, res) => {
 // off. Runs own depth continuity for the hole; samples and tests are then
 // validated against the run they fall inside.
 
-// Finds the run whose depth interval contains the given interval. Prefers a
-// run that fully contains it; falls back to the run with the largest overlap
-// so a sample straddling a run boundary still links somewhere sensible.
+// Finds the drilling run a sample or test belongs to.
+//
+// Resolution order matters. A sampler is driven ahead of the hole bottom, so
+// an interval that crosses a run boundary was taken while the *earlier* run
+// was in progress — the start depth is what identifies the run, not whichever
+// side of the boundary happens to contain more of the interval. Picking by
+// largest overlap would assign an SPT at 14.8–15.25 m to the run starting at
+// 15 m, which is a run that had not begun when the sample was taken.
 function resolveRunForDepth(boreholeId, depthFrom, depthTo) {
   const from = Number(depthFrom);
   const to = Number(depthTo);
   if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
   const runs = db.prepare('SELECT id, depth_from, depth_to FROM drilling_runs WHERE borehole_id = ?').all(boreholeId);
+
+  // 1. A run that fully contains the interval — the ordinary case.
   const contains = runs.find((r) => from >= r.depth_from - 1e-9 && to <= r.depth_to + 1e-9);
   if (contains) return contains.id;
+
+  // 2. Straddling a boundary: the run that was being drilled at the start depth.
+  const atStart = runs.find((r) => from >= r.depth_from - 1e-9 && from < r.depth_to - 1e-9);
+  if (atStart) return atStart.id;
+
+  // 3. Last resort — any overlap at all, largest first.
   let best = null;
   let bestOverlap = 0;
   for (const r of runs) {

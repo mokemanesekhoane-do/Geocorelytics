@@ -264,11 +264,17 @@ function completion(boreholes, runs) {
       const dates = [...new Set(rs.map((r) => r.date).filter(Boolean))].sort();
       const rate = dates.length ? drilled / dates.length : null;
       const remaining = targetDepth ? Math.max(0, targetDepth - deepest) : null;
+      const finished = b.status === 'Complete' || b.status === 'Abandoned';
       let eta = null;
-      if (rate && rate > 0 && remaining !== null && remaining > 0 && dates.length >= 2) {
+      // A finished hole has no completion to forecast, even if it stopped
+      // short of its planned depth — that is a variance, not remaining work.
+      if (!finished && rate > 0 && remaining !== null && remaining > 0 && dates.length >= 2) {
         const daysLeft = Math.ceil(remaining / rate);
+        // Project from today when drilling has already stalled, otherwise the
+        // forecast lands in the past and reads as though it were met.
         const lastDate = Date.parse(dates[dates.length - 1]);
-        eta = new Date(lastDate + daysLeft * 86400000).toISOString().slice(0, 10);
+        const from = Math.max(lastDate, Date.parse(new Date().toISOString().slice(0, 10)));
+        eta = new Date(from + daysLeft * 86400000).toISOString().slice(0, 10);
       }
       return {
         borehole_id: b.id,
