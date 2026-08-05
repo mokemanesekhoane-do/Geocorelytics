@@ -397,6 +397,90 @@
   color: var(--text-dim);
 }
 
+/* ---------- Derived values ---------- */
+
+.derived-panel {
+  background: var(--shell-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin: 4px 0 2px;
+}
+
+.derived-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.derived-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.derived-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.derived-label {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.derived-item strong {
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.derived-item strong.is-overridden { color: var(--amber); }
+
+/* A field the system fills in: visibly not for typing into. */
+input.is-derived {
+  background: var(--shell-bg);
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+
+.field-hint {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.override-box {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* RQD bands — sequential severity, poorest to best. */
+.rqd-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.rqd-very-poor { background: var(--red-light); color: #a32a2a; }
+.rqd-poor { background: #fdf0e9; color: #a75330; }
+.rqd-fair { background: var(--amber-light); color: #8a5c08; }
+.rqd-good { background: var(--blue-light); color: #1c5cab; }
+.rqd-excellent { background: var(--green-light); color: var(--green-dark); }
+
 /* ---------- Auth ---------- */
 
 .auth-card .auth-alt {

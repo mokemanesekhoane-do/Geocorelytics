@@ -196,11 +196,10 @@ const RUN_FIELD_GROUPS = [
     title: 'Recovery & rate',
     fields: [
       { name: 'core_recovered_m', label: 'Core Recovered (m)', type: 'number' },
-      { name: 'rqd_pct', label: 'RQD (%)', type: 'number' },
-      { name: 'penetration_rate_m_hr', label: 'Penetration Rate (m/h)', type: 'number' },
-      { name: 'drilling_time_min', label: 'Drilling Time (min)', type: 'number' },
-      { name: 'recovery_quality', label: 'Recovery Quality', lookup: 'recovery_quality', dataOnly: true },
-      { name: 'fracture_condition', label: 'Fracture Condition', lookup: 'fracture_condition', dataOnly: true },
+      // Active time only — delays are captured separately below, so the rate
+      // reflects how the ground drilled rather than how the shift ran.
+      { name: 'drilling_time_min', label: 'Active Drilling Time (min)', type: 'number', hint: 'Time actually cutting — exclude standing, breakdown and delay time' },
+      { name: 'rqd_pct', label: 'RQD (%)', type: 'number', hint: 'Classification is assigned automatically' },
     ],
   },
   {
@@ -226,7 +225,37 @@ const RUN_FIELD_GROUPS = [
 function runFieldHtml(f, value) {
   if (f.lookup) return lookupSelectHtml(f.lookup, f.name, value, { label: f.label, full: f.full });
   const wrap = f.full ? 'full' : '';
-  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" /></div>`;
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" />${
+    f.hint ? `<p class="field-hint">${esc(f.hint)}</p>` : ''
+  }</div>`;
+}
+
+// The block of values the system works out for itself. Shown read-only so the
+// operator can see the figures being recorded, with an explicit affordance to
+// correct one when the calculation does not reflect what happened on site.
+function derivedPanelHtml(existing) {
+  existing = existing || {};
+  return `
+    <div class="full derived-panel" id="run-derived">
+      <div class="derived-head">
+        <span>Calculated automatically</span>
+        <button type="button" class="link" id="run-override-toggle">Adjust rate</button>
+      </div>
+      <div class="derived-grid">
+        <div class="derived-item"><span class="derived-label">Depth drilled</span><strong id="d-depth">&mdash;</strong></div>
+        <div class="derived-item"><span class="derived-label">Penetration rate</span><strong id="d-rate">&mdash;</strong></div>
+        <div class="derived-item"><span class="derived-label">Core recovery</span><strong id="d-recovery">&mdash;</strong></div>
+        <div class="derived-item"><span class="derived-label">RQD classification</span><strong id="d-rqd">&mdash;</strong></div>
+      </div>
+      <div class="override-box hidden" id="run-override-box">
+        <div class="form-grid">
+          <div><label>Corrected Penetration Rate (m/h)</label><input type="number" step="any" name="penetration_rate_override" value="${esc(existing.penetration_rate_override ?? '')}" /></div>
+          <div><label>Reason for the correction *</label><input name="override_reason" placeholder="Why the calculated rate is not correct" value="" /></div>
+        </div>
+        <p class="lookup-hint">Recorded against this run with your name and the calculated value it replaced.</p>
+      </div>
+    </div>
+  `;
 }
 
 // `prefill` comes from /next-run: the last run's context, so the operator
@@ -241,6 +270,7 @@ function runModalFieldsHtml(prefill, existing) {
     <div class="item"><span class="label">Target depth</span>${prefill.target_depth ? `${prefill.target_depth} m` : '&mdash;'}</div>
     ${depthFieldsHtml(lastEnd, existing)}
     <div class="full" id="run-validation"></div>
+    ${derivedPanelHtml(existing)}
     ${RUN_FIELD_GROUPS.map(
       (g) => `<div class="full form-section-title">${esc(g.title)}</div>` +
         g.fields.filter((f) => !f.dataOnly).map((f) => runFieldHtml(f, existing[f.name] ?? (f.name === 'date' ? val('date') || todayStr() : val(f.name)))).join('')
@@ -268,8 +298,64 @@ async function openRunModal(boreholeId, existing, onSaved) {
   });
   wireDepthContinuity(form, lastEnd);
   wireLookups(form);
+  wireRunDerived(form);
   wireRunValidation(form, prefill.target_depth);
   return form;
+}
+
+// Recomputes the derived block as the operator types. Uses the same derive.js
+// the server uses, so what is shown here is what will be stored.
+function wireRunDerived(form) {
+  const panel = form.querySelector('#run-derived');
+  if (!panel) return;
+  const get = (n) => form.querySelector(`[name="${n}"]`);
+  const set = (id, text, cls) => {
+    const el = panel.querySelector(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = cls || '';
+  };
+
+  const toggle = form.querySelector('#run-override-toggle');
+  const box = form.querySelector('#run-override-box');
+  toggle.addEventListener('click', () => {
+    const opening = box.classList.contains('hidden');
+    box.classList.toggle('hidden', !opening);
+    toggle.textContent = opening ? 'Use calculated rate' : 'Adjust rate';
+    if (!opening) {
+      // Closing discards the override so a stale value cannot be submitted.
+      box.querySelector('[name="penetration_rate_override"]').value = '';
+      box.querySelector('[name="override_reason"]').value = '';
+    }
+    box.querySelector('[name="override_reason"]').required = opening;
+    recalc();
+  });
+
+  function recalc() {
+    const from = get('depth_from')?.value;
+    const to = get('depth_to')?.value;
+    const mins = get('drilling_time_min')?.value;
+    const core = parseFloat(get('core_recovered_m')?.value);
+    const rqd = get('rqd_pct')?.value;
+
+    const metres = DERIVE.depthDrilled(from, to);
+    set('#d-depth', metres === null ? '—' : `${metres} m`);
+
+    const overridden = !box.classList.contains('hidden') && get('penetration_rate_override')?.value;
+    const rate = overridden ? Number(get('penetration_rate_override').value) : DERIVE.penetrationRate(from, to, mins);
+    set('#d-rate', rate === null || !Number.isFinite(rate) ? '—' : `${rate} m/h${overridden ? ' (adjusted)' : ''}`,
+      overridden ? 'is-overridden' : '');
+
+    const recPct = metres && Number.isFinite(core) ? Number(((core / metres) * 100).toFixed(1)) : null;
+    set('#d-recovery', recPct === null ? '—' : `${recPct}%`);
+
+    const cls = DERIVE.rqdClassification(rqd);
+    set('#d-rqd', cls || (rqd === '' || rqd === undefined ? '—' : 'Out of range'),
+      cls ? `rqd-badge rqd-${cls.toLowerCase().replace(/\s+/g, '-')}` : '');
+  }
+
+  form.addEventListener('input', recalc);
+  recalc();
 }
 
 // Live checks mirroring the server's rules, so the operator is told at the
@@ -609,7 +695,6 @@ const SAMPLE_TYPES = {
       { name: 'blows_150_1', label: 'Blows — 1st 150 mm', type: 'number' },
       { name: 'blows_150_2', label: 'Blows — 2nd 150 mm', type: 'number' },
       { name: 'blows_150_3', label: 'Blows — 3rd 150 mm', type: 'number' },
-      { name: 'penetration_length_mm', label: 'Penetration Length (mm)', type: 'number', placeholder: '450' },
       { name: 'recovery_length_mm', label: 'Sample Recovery Length (mm)', type: 'number' },
       // Outcome and condition — standard terms.
       { name: 'refusal_status', label: 'Refusal Status', lookup: 'refusal_status' },
@@ -819,6 +904,35 @@ function sampleModalFieldsHtml(lastEnd, existing) {
     <div><label>Sample/Test Reference</label><input name="sample_ref" value="${esc(existing.sample_ref || '')}" /></div>
     <div><label>Date</label><input type="date" name="date" value="${esc(existing.date || todayStr())}" /></div>
     <div><label>Time</label><input type="time" name="time" value="${esc(existing.time || '')}" /></div>
+    <div class="full hidden" id="spt-drive">
+      <div class="derived-panel">
+        <div class="derived-head">
+          <span>Drive &mdash; set from the bottom of the hole</span>
+          <button type="button" class="link" id="spt-depth-toggle">Adjust start depth</button>
+        </div>
+        <div class="form-grid">
+          <div>
+            <label>Penetration Achieved (mm)</label>
+            <input type="number" step="any" name="penetration_achieved_mm" value="${esc(existing.penetration_achieved_mm ?? 450)}" />
+            <p class="field-hint">Standard drive is 450 mm (3 &times; 150 mm)</p>
+          </div>
+          <div class="hidden" id="spt-short-reason-wrap">
+            <label>Reason the drive stopped short *</label>
+            <select name="short_penetration_reason">
+              <option value="">Select a reason&hellip;</option>
+              ${['Refusal', 'Obstruction', 'Very dense material', 'Hard layer', 'Equipment limitation']
+                .map((r) => `<option ${r === existing.short_penetration_reason ? 'selected' : ''}>${r}</option>`)
+                .join('')}
+            </select>
+          </div>
+        </div>
+        <div class="derived-grid">
+          <div class="derived-item"><span class="derived-label">Start depth</span><strong id="spt-from">&mdash;</strong></div>
+          <div class="derived-item"><span class="derived-label">End depth</span><strong id="spt-to">&mdash;</strong></div>
+          <div class="derived-item"><span class="derived-label">Next run continues from</span><strong id="spt-next">&mdash;</strong></div>
+        </div>
+      </div>
+    </div>
     ${depthFieldsHtml(lastEnd, existing)}
     <div class="full" id="interval-validation"></div>
     <div class="full" id="sample-type-fields-wrap">
@@ -845,6 +959,67 @@ function sampleModalFieldsHtml(lastEnd, existing) {
   `;
 }
 
+// SPT depths follow from where drilling stopped and how far the sampler got,
+// so the operator enters penetration and the interval falls out of it. The
+// depth fields stay locked unless an adjustment is deliberately unlocked.
+function wireSptDrive(form, context) {
+  const panel = form.querySelector('#spt-drive');
+  const typeSelect = form.querySelector('#sample-type-select');
+  if (!panel || !typeSelect) return;
+
+  const fromInput = form.querySelector('[name="depth_from"]');
+  const toInput = form.querySelector('[name="depth_to"]');
+  const penInput = form.querySelector('[name="penetration_achieved_mm"]');
+  const shortWrap = form.querySelector('#spt-short-reason-wrap');
+  const shortSelect = form.querySelector('[name="short_penetration_reason"]');
+  const toggle = form.querySelector('#spt-depth-toggle');
+  const holeBottom = context ? context.suggested_from : null;
+  let unlocked = false;
+
+  toggle.addEventListener('click', () => {
+    unlocked = !unlocked;
+    fromInput.readOnly = !unlocked;
+    fromInput.classList.toggle('is-derived', !unlocked);
+    toggle.textContent = unlocked ? 'Use hole bottom' : 'Adjust start depth';
+    if (!unlocked && holeBottom !== null) fromInput.value = holeBottom;
+    apply();
+  });
+
+  function apply() {
+    const isSpt = typeSelect.value === 'SPT';
+    panel.classList.toggle('hidden', !isSpt);
+    // Depth stays operator-controlled for non-SPT methods, which are not a
+    // fixed-length drive.
+    fromInput.readOnly = isSpt && !unlocked;
+    toInput.readOnly = isSpt;
+    fromInput.classList.toggle('is-derived', isSpt && !unlocked);
+    toInput.classList.toggle('is-derived', isSpt);
+    if (!isSpt) return;
+
+    const pen = Number(penInput.value);
+    const short = Number.isFinite(pen) && pen > 0 && pen < DERIVE.SPT_STANDARD_PENETRATION_MM;
+    shortWrap.classList.toggle('hidden', !short);
+    shortSelect.required = short;
+    if (!short) shortSelect.value = '';
+
+    const interval = DERIVE.sptInterval(fromInput.value, pen);
+    if (interval) {
+      toInput.value = interval.depth_to;
+      panel.querySelector('#spt-from').textContent = `${interval.depth_from} m`;
+      panel.querySelector('#spt-to').textContent = `${interval.depth_to} m`;
+      panel.querySelector('#spt-next').textContent = `${interval.depth_to} m`;
+    }
+    // Keep the mirrored SPT field in step so the calculator sees the same value.
+    const mirrored = form.querySelector('[name="sf_penetration_length_mm"]');
+    if (mirrored) mirrored.value = Number.isFinite(pen) && pen > 0 ? pen : DERIVE.SPT_STANDARD_PENETRATION_MM;
+  }
+
+  typeSelect.addEventListener('change', apply);
+  penInput.addEventListener('input', apply);
+  fromInput.addEventListener('input', apply);
+  apply();
+}
+
 function wireSampleModal(form, lastEnd, context) {
   wireDepthContinuity(form, lastEnd);
   wireLookups(form);
@@ -857,6 +1032,7 @@ function wireSampleModal(form, lastEnd, context) {
   }
   typeSelect.addEventListener('change', rebuild);
   wireSampleTypeCalc(form, typeSelect.value);
+  wireSptDrive(form, context);
   if (context) wireIntervalValidation(form, context);
 }
 

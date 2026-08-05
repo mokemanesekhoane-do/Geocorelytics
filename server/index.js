@@ -6,6 +6,9 @@ const multer = require('multer');
 const db = require('./db');
 const analytics = require('./analytics');
 const { CATEGORIES: LOOKUP_CATEGORIES } = require('./lookups');
+// Same module the browser loads, so a value shown live in the form and the
+// value stored here are computed by identical code.
+const derive = require('../public/derive');
 const {
   hashPassword,
   verifyPassword,
@@ -94,7 +97,7 @@ function getProjectIdForTest(testId) {
 // ended unless a skip_reason justifies the gap. Returns an error string, or
 // null if the interval is valid. `existingRows` must be the other entries
 // already recorded for this borehole (excluding the row being edited, if any).
-function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows }) {
+function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows, gapIsDrilled }) {
   const from = Number(depthFrom);
   const to = Number(depthTo);
   if (!Number.isFinite(from) || !Number.isFinite(to)) {
@@ -110,9 +113,37 @@ function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows })
   }
   if (existingRows.length > 0) {
     const lastEnd = Math.max(...existingRows.map((r) => r.depth_to));
-    if (from > lastEnd && !skipReason) {
-      return `There is a gap between the last recorded depth (${lastEnd} m) and this entry's start (${from} m). Provide a reason for the skipped interval to continue.`;
+    // Samples and tests are taken at intervals with drilling in between, so a
+    // gap only means something is missing if that ground was never drilled.
+    // `gapIsDrilled` is supplied for those records; drilling runs pass nothing
+    // and keep the strict rule, since a gap between runs is unexplained depth.
+    const explained = skipReason || (gapIsDrilled ? gapIsDrilled(lastEnd, from) : false);
+    if (from > lastEnd + 1e-9 && !explained) {
+      return `There is a gap between the last recorded depth (${lastEnd} m) and this entry's start (${from} m), and that interval has not been drilled. Record the drilling run, or give a reason for the skipped interval.`;
     }
+  }
+  return null;
+}
+
+// An SPT drive that stops short of the standard 450 mm has to say why —
+// refusal, obstruction, dense material and so on — because the shortfall is
+// itself a ground observation, and the hole only advances by what was
+// actually achieved. Also checks the stated penetration agrees with the
+// recorded interval, so the two cannot drift apart.
+function validatePenetration(sampleType, body, depthFrom, depthTo) {
+  if (sampleType !== 'SPT') return null;
+  const achieved = Number(body.penetration_achieved_mm);
+  if (!Number.isFinite(achieved)) return null;
+  if (achieved <= 0) return 'Penetration achieved must be greater than zero';
+  if (achieved > derive.SPT_STANDARD_PENETRATION_MM) {
+    return `Penetration achieved (${achieved} mm) exceeds the standard SPT drive of ${derive.SPT_STANDARD_PENETRATION_MM} mm`;
+  }
+  if (achieved < derive.SPT_STANDARD_PENETRATION_MM && !body.short_penetration_reason) {
+    return `The drive stopped at ${achieved} mm of the standard ${derive.SPT_STANDARD_PENETRATION_MM} mm. Record why (${derive.SHORT_PENETRATION_REASONS.join(', ')}).`;
+  }
+  const expectedTo = Number(depthFrom) + achieved / 1000;
+  if (Math.abs(Number(depthTo) - expectedTo) > 0.005) {
+    return `Depth To (${depthTo} m) does not match ${achieved} mm driven from ${depthFrom} m — expected ${expectedTo.toFixed(3)} m`;
   }
   return null;
 }
@@ -517,7 +548,10 @@ app.post('/api/boreholes/:boreholeId/logs', writeRoles, (req, res) => {
   const existingRows = db
     .prepare('SELECT depth_from, depth_to FROM log_entries WHERE borehole_id = ?')
     .all(req.params.boreholeId);
-  const validationError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
+  const validationError = validateDepthInterval({
+    depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+  });
   if (validationError) return res.status(400).json({ error: validationError });
   const info = db
     .prepare(
@@ -594,6 +628,12 @@ function resolveRunForDepth(boreholeId, depthFrom, depthTo) {
   const atStart = runs.find((r) => from >= r.depth_from - 1e-9 && from < r.depth_to - 1e-9);
   if (atStart) return atStart.id;
 
+  // 3. Driven from the bottom of the hole. An SPT starts exactly where
+  //    drilling stopped and penetrates below it, so it belongs to the run
+  //    that got the hole there.
+  const deepest = runs.reduce((a, r) => (!a || r.depth_to > a.depth_to ? r : a), null);
+  if (deepest && Math.abs(from - deepest.depth_to) < 1e-6) return deepest.id;
+
   // 3. Last resort — any overlap at all, largest first.
   let best = null;
   let bestOverlap = 0;
@@ -621,15 +661,83 @@ function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun } 
   }
   if (from < -1e-9) return 'Depth From cannot be negative';
   if (requireRun) {
-    const runCount = db.prepare('SELECT COUNT(*) c FROM drilling_runs WHERE borehole_id = ?').get(boreholeId).c;
-    if (runCount === 0) {
+    const runCount = db.prepare('SELECT COUNT(*) AS c FROM drilling_runs WHERE borehole_id = ?').get(boreholeId).c;
+    if (!runCount) {
       return `No drilling run has been recorded for ${bh.code} yet. Capture the drilling run covering ${from}–${to} m before adding this record.`;
     }
-    if (resolveRunForDepth(boreholeId, from, to) === null) {
-      return `No drilling run covers ${from}–${to} m. Record the drilling run for this interval first.`;
+    // Two legitimate starting points: inside ground a run has already cut, or
+    // exactly at the bottom of the hole, where the sampler is driven ahead of
+    // the bit. The bottom includes earlier samples, since those advanced the
+    // hole too. Anything else is either below the hole or inside a stretch
+    // that was skipped rather than drilled.
+    const bottom = holeBottom(boreholeId).depth;
+    if (from > bottom + 1e-9) {
+      return `The hole has only reached ${bottom} m. Record the drilling run that reaches ${from} m before adding this record.`;
+    }
+    const atBottom = Math.abs(from - bottom) < 1e-6;
+    if (!atBottom && resolveRunForDepth(boreholeId, from, to) === null) {
+      return `No drilling run covers ${from} m, and it is not at the bottom of the hole (${bottom} m). Record the drilling run for this interval first.`;
     }
   }
   return null;
+}
+
+// True when every metre between `from` and `to` is accounted for by some
+// record of the hole being advanced.
+//
+// Drilling runs and samples both advance the hole: the bit cuts, and a sampler
+// driven from the bottom penetrates below it. So the two chains interleave —
+// a run legitimately starts where an SPT finished, and a sample legitimately
+// starts where a run finished. Judging either chain on its own reports the
+// other's advance as a gap, which is why coverage is taken across all three
+// record types together.
+function intervalIsCovered(boreholeId, from, to) {
+  if (to <= from + 1e-9) return true;
+  const spans = db
+    .prepare(
+      `SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ?
+       UNION ALL SELECT depth_from, depth_to FROM samples WHERE borehole_id = ?
+       UNION ALL SELECT depth_from, depth_to FROM tests WHERE borehole_id = ?
+       ORDER BY depth_from ASC`
+    )
+    .all(boreholeId, boreholeId, boreholeId);
+  let covered = from;
+  for (const s of spans) {
+    if (s.depth_to <= covered + 1e-9) continue;
+    if (s.depth_from > covered + 1e-9) break; // an unaccounted-for stretch
+    covered = s.depth_to;
+    if (covered >= to - 1e-9) return true;
+  }
+  return covered >= to - 1e-9;
+}
+
+// Records an authorised departure from a computed value. The reason is
+// mandatory at the call site — an override without one is rejected before it
+// reaches here.
+function recordOverride(entityType, entityId, field, computedValue, overrideValue, reason, userId) {
+  db.prepare(
+    `INSERT INTO audit_log (entity_type, entity_id, field, computed_value, override_value, reason, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(entityType, entityId, field, computedValue === null || computedValue === undefined ? null : String(computedValue),
+    overrideValue === null || overrideValue === undefined ? null : String(overrideValue), reason, userId);
+}
+
+// Applies the derived fields to a run payload and returns the values to store
+// plus any override that needs auditing. The client's penetration_rate is
+// ignored unless it is an explicit, justified override.
+function deriveRunValues(body) {
+  const computedRate = derive.penetrationRate(body.depth_from, body.depth_to, body.drilling_time_min);
+  const override = body.penetration_rate_override;
+  if (override !== undefined && override !== null && override !== '') {
+    if (!body.override_reason) {
+      return { error: 'Adjusting the calculated penetration rate requires a reason' };
+    }
+    return {
+      penetration_rate_m_hr: Number(override),
+      audit: { field: 'penetration_rate_m_hr', computed: computedRate, value: Number(override), reason: body.override_reason },
+    };
+  }
+  return { penetration_rate_m_hr: computedRate };
 }
 
 function validateRunData(body, interval) {
@@ -651,6 +759,17 @@ function validateRunData(body, interval) {
   return null;
 }
 
+// Adds the values the system derives, so every consumer — register, report,
+// analytics, the form — sees the same classification without recomputing it.
+function parseRunRow(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    depth_drilled_m: derive.depthDrilled(row.depth_from, row.depth_to),
+    rqd_classification: derive.rqdClassification(row.rqd_pct),
+  };
+}
+
 const RUN_FIELDS = [
   'run_number', 'depth_from', 'depth_to', 'date', 'shift', 'start_time', 'end_time',
   'drilling_method', 'rig_name', 'operator_name', 'helper_name', 'bit_type', 'core_barrel_type',
@@ -658,6 +777,18 @@ const RUN_FIELDS = [
   'downtime_reason', 'water_loss_pct', 'groundwater_obs', 'ground_conditions', 'refusal_reason',
   'drilling_status', 'remarks', 'skip_reason', 'supervisor_name',
 ];
+
+// The deepest point the hole has actually reached, across drilling runs and
+// anything driven below them. Reported with its source so the form can tell
+// the operator why the next run starts where it does.
+function holeBottom(boreholeId) {
+  const run = db.prepare('SELECT MAX(depth_to) AS d FROM drilling_runs WHERE borehole_id = ?').get(boreholeId).d || 0;
+  const sample = db.prepare('SELECT MAX(depth_to) AS d FROM samples WHERE borehole_id = ?').get(boreholeId).d || 0;
+  const test = db.prepare('SELECT MAX(depth_to) AS d FROM tests WHERE borehole_id = ?').get(boreholeId).d || 0;
+  const depth = Math.max(run, sample, test);
+  const source = depth === 0 ? 'start of hole' : sample >= run && sample >= test ? 'end of last sample' : test > run ? 'end of last test' : 'end of last drilling run';
+  return { depth: Number(depth.toFixed(3)), source, drilled: run };
+}
 
 // Relinks every sample/test in a borehole to the run covering it. Called after
 // any run is created, edited or deleted so the linkage can never drift.
@@ -684,7 +815,7 @@ app.get('/api/runs', (req, res) => {
        ORDER BY r.date DESC, r.id DESC`
     )
     .all(...sf.params);
-  res.json(rows);
+  res.json(rows.map(parseRunRow));
 });
 
 app.get('/api/boreholes/:boreholeId/runs', (req, res) => {
@@ -692,7 +823,9 @@ app.get('/api/boreholes/:boreholeId/runs', (req, res) => {
   if (projectId === null) return notFound(res, 'Borehole');
   if (!canAccessProject(req.user, projectId)) return forbidden(res);
   res.json(
-    db.prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_from ASC, id ASC').all(req.params.boreholeId)
+    db.prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_from ASC, id ASC')
+      .all(req.params.boreholeId)
+      .map(parseRunRow)
   );
 });
 
@@ -709,9 +842,15 @@ app.get('/api/boreholes/:boreholeId/next-run', (req, res) => {
   const maxRunNo = db
     .prepare('SELECT MAX(run_number) AS n FROM drilling_runs WHERE borehole_id = ?')
     .get(req.params.boreholeId).n;
+  // The hole bottom is the deepest point reached by anything — a sampler
+  // driven below the last run advanced the hole, so drilling resumes from
+  // where the sampler finished, not from where drilling stopped.
+  const bottom = holeBottom(req.params.boreholeId);
   res.json({
     run_number: (maxRunNo || 0) + 1,
-    depth_from: last ? last.depth_to : 0,
+    depth_from: bottom.depth,
+    depth_from_source: bottom.source,
+    drilled_to: last ? last.depth_to : 0,
     target_depth: bh.planned_depth ?? bh.total_depth ?? null,
     defaults: {
       drilling_method: last?.drilling_method ?? bh.drill_method ?? null,
@@ -731,25 +870,46 @@ app.get('/api/boreholes/:boreholeId/next-interval', (req, res) => {
   const projectId = getProjectIdForBorehole(req.params.boreholeId);
   if (projectId === null) return notFound(res, 'Borehole');
   if (!canAccessProject(req.user, projectId)) return forbidden(res);
-  const kind = req.query.kind === 'test' ? 'tests' : 'samples';
-  const last = db
-    .prepare(`SELECT depth_to FROM ${kind} WHERE borehole_id = ? ORDER BY depth_to DESC LIMIT 1`)
-    .get(req.params.boreholeId);
-  const lastRun = db
-    .prepare('SELECT depth_to FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_to DESC LIMIT 1')
-    .get(req.params.boreholeId);
-  const suggested = last ? last.depth_to : 0;
   const runs = db.prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_from ASC').all(req.params.boreholeId);
-  const run = runs.find((r) => suggested >= r.depth_from - 1e-9 && suggested < r.depth_to + 1e-9) || null;
+  const bottom = holeBottom(req.params.boreholeId);
+
+  // A sampler is driven from the bottom of the hole, so the next sample or
+  // test starts exactly where the hole currently ends — not where the last
+  // sample finished. That is what links the SPT to its drilling run.
+  const suggested = bottom.depth;
+  const lastRun = runs.reduce((a, r) => (!a || r.depth_to > a.depth_to ? r : a), null);
+  const run =
+    runs.find((r) => suggested >= r.depth_from - 1e-9 && suggested < r.depth_to - 1e-9) ||
+    (lastRun && Math.abs(suggested - lastRun.depth_to) < 1e-6 ? lastRun : null);
+
+  const standard = derive.sptInterval(suggested, derive.SPT_STANDARD_PENETRATION_MM);
   res.json({
     suggested_from: suggested,
-    drilled_to: lastRun ? lastRun.depth_to : 0,
+    suggested_source: bottom.source,
+    drilled_to: bottom.drilled,
+    // The standard 450 mm drive, pre-computed so the form does not have to.
+    standard_penetration_mm: derive.SPT_STANDARD_PENETRATION_MM,
+    suggested_to: standard ? standard.depth_to : null,
+    short_penetration_reasons: derive.SHORT_PENETRATION_REASONS,
     run,
     runs,
     defaults: run
       ? { operator_name: run.operator_name, date: run.date, drilling_method: run.drilling_method, rig_name: run.rig_name, shift: run.shift }
       : {},
   });
+});
+
+// Audit trail for a record, so a value that disagrees with its inputs can be
+// traced to who changed it and why.
+app.get('/api/audit/:entityType/:entityId', (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT a.*, u.name AS user_name FROM audit_log a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.entity_type = ? AND a.entity_id = ? ORDER BY a.created_at DESC`
+    )
+    .all(req.params.entityType, req.params.entityId);
+  res.json(rows);
 });
 
 app.post('/api/boreholes/:boreholeId/runs', writeRoles, (req, res) => {
@@ -762,22 +922,36 @@ app.post('/api/boreholes/:boreholeId/runs', writeRoles, (req, res) => {
   const existingRows = db
     .prepare('SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ?')
     .all(req.params.boreholeId);
-  const depthError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
+  // A run may start where a sampler left off, so coverage is judged across
+  // every record that advanced the hole, not just the previous runs.
+  const depthError = validateDepthInterval({
+    depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+  });
   if (depthError) return res.status(400).json({ error: depthError });
   const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: false });
   if (rangeError) return res.status(400).json({ error: rangeError });
   const dataError = validateRunData(req.body, Number(depth_to) - Number(depth_from));
   if (dataError) return res.status(400).json({ error: dataError });
 
-  const values = RUN_FIELDS.map((f) => (req.body[f] === undefined || req.body[f] === '' ? null : req.body[f]));
+  // Penetration rate is computed from depth and active drilling time; a value
+  // sent by the client is ignored unless it is a justified override.
+  const derived = deriveRunValues(req.body);
+  if (derived.error) return res.status(400).json({ error: derived.error });
+
+  const payload = { ...req.body, penetration_rate_m_hr: derived.penetration_rate_m_hr };
+  const values = RUN_FIELDS.map((f) => (payload[f] === undefined || payload[f] === '' ? null : payload[f]));
   const info = db
     .prepare(
       `INSERT INTO drilling_runs (borehole_id, ${RUN_FIELDS.join(', ')}, approved_at, created_by)
        VALUES (?, ${RUN_FIELDS.map(() => '?').join(', ')}, ?, ?)`
     )
     .run(req.params.boreholeId, ...values, req.body.supervisor_name ? new Date().toISOString() : null, req.user.id);
+  if (derived.audit) {
+    recordOverride('run', info.lastInsertRowid, derived.audit.field, derived.audit.computed, derived.audit.value, derived.audit.reason, req.user.id);
+  }
   relinkBorehole(req.params.boreholeId);
-  res.status(201).json(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(info.lastInsertRowid));
+  res.status(201).json(parseRunRow(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(info.lastInsertRowid)));
 });
 
 app.put('/api/runs/:id', writeRoles, (req, res) => {
@@ -793,6 +967,7 @@ app.put('/api/runs/:id', writeRoles, (req, res) => {
     depthTo: newTo,
     skipReason: req.body.skip_reason ?? existing.skip_reason,
     existingRows: otherRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b),
   });
   if (depthError) return res.status(400).json({ error: depthError });
   const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: false });
@@ -800,13 +975,23 @@ app.put('/api/runs/:id', writeRoles, (req, res) => {
   const dataError = validateRunData({ ...existing, ...req.body }, Number(newTo) - Number(newFrom));
   if (dataError) return res.status(400).json({ error: dataError });
 
-  const values = RUN_FIELDS.map((f) => (req.body[f] === undefined ? existing[f] : req.body[f] === '' ? null : req.body[f]));
+  const merged = { ...existing, ...req.body, depth_from: newFrom, depth_to: newTo };
+  const derived = deriveRunValues(merged);
+  if (derived.error) return res.status(400).json({ error: derived.error });
+  const payload = { ...req.body, penetration_rate_m_hr: derived.penetration_rate_m_hr };
+
+  const values = RUN_FIELDS.map((f) =>
+    f === 'penetration_rate_m_hr' ? payload[f] : payload[f] === undefined ? existing[f] : payload[f] === '' ? null : payload[f]
+  );
   const supervisor = req.body.supervisor_name ?? existing.supervisor_name;
   db.prepare(
     `UPDATE drilling_runs SET ${RUN_FIELDS.map((f) => `${f} = ?`).join(', ')}, approved_at = ? WHERE id = ?`
   ).run(...values, supervisor ? existing.approved_at || new Date().toISOString() : null, req.params.id);
+  if (derived.audit) {
+    recordOverride('run', req.params.id, derived.audit.field, derived.audit.computed, derived.audit.value, derived.audit.reason, req.user.id);
+  }
   relinkBorehole(existing.borehole_id);
-  res.json(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(req.params.id));
+  res.json(parseRunRow(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(req.params.id)));
 });
 
 app.delete('/api/runs/:id', writeRoles, (req, res) => {
@@ -885,13 +1070,21 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
   const existingRows = db
     .prepare('SELECT depth_from, depth_to FROM samples WHERE borehole_id = ?')
     .all(req.params.boreholeId);
-  const depthError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
+  const depthError = validateDepthInterval({
+    depthFrom: depth_from,
+    depthTo: depth_to,
+    skipReason: skip_reason,
+    existingRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+  });
   if (depthError) return res.status(400).json({ error: depthError });
   const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
   if (rangeError) return res.status(400).json({ error: rangeError });
   const parsedSampleData = typeof sample_data === 'string' ? JSON.parse(sample_data || '{}') : sample_data || {};
   const dataError = validateSampleData(sample_type, parsedSampleData);
   if (dataError) return res.status(400).json({ error: dataError });
+  const penError = validatePenetration(sample_type, req.body, depth_from, depth_to);
+  if (penError) return res.status(400).json({ error: penError });
   const runId = resolveRunForDepth(req.params.boreholeId, depth_from, depth_to);
   const approvedAt = supervisor_name ? new Date().toISOString() : null;
   const info = db
@@ -899,8 +1092,8 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
       `INSERT INTO samples
         (borehole_id, depth, depth_from, depth_to, sample_type, spt_n_value, recovery_pct, lab_status, notes,
          skip_reason, sample_ref, date, time, operator_name, supervisor_name, approved_at, groundwater_obs,
-         description, sample_data, run_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         description, sample_data, run_id, penetration_achieved_mm, short_penetration_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.boreholeId,
@@ -922,7 +1115,9 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
       groundwater_obs || null,
       description || null,
       toJsonText(sample_data),
-      runId
+      runId,
+      req.body.penetration_achieved_mm ?? null,
+      req.body.short_penetration_reason || null
     );
   const sample = db.prepare('SELECT * FROM samples WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(parseSampleRow(sample));
@@ -959,11 +1154,14 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     depthTo: newTo,
     skipReason: skip_reason ?? existing.skip_reason,
     existingRows: otherRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b),
   });
   if (depthError) return res.status(400).json({ error: depthError });
   const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });
   if (rangeError) return res.status(400).json({ error: rangeError });
   const newSampleType = sample_type ?? existing.sample_type;
+  const penError = validatePenetration(newSampleType, { ...existing, ...req.body }, newFrom, newTo);
+  if (penError) return res.status(400).json({ error: penError });
   const parsedSampleData =
     sample_data !== undefined
       ? typeof sample_data === 'string'
@@ -976,7 +1174,8 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
   db.prepare(
     `UPDATE samples SET depth = ?, depth_from = ?, depth_to = ?, sample_type = ?, spt_n_value = ?, recovery_pct = ?,
       lab_status = ?, notes = ?, skip_reason = ?, sample_ref = ?, date = ?, time = ?, operator_name = ?,
-      supervisor_name = ?, approved_at = ?, groundwater_obs = ?, description = ?, sample_data = ?, run_id = ?
+      supervisor_name = ?, approved_at = ?, groundwater_obs = ?, description = ?, sample_data = ?, run_id = ?,
+      penetration_achieved_mm = ?, short_penetration_reason = ?
      WHERE id = ?`
   ).run(
     newFrom,
@@ -998,6 +1197,8 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     description ?? null,
     sample_data !== undefined ? toJsonText(sample_data) : existing.sample_data,
     resolveRunForDepth(existing.borehole_id, newFrom, newTo),
+    req.body.penetration_achieved_mm ?? existing.penetration_achieved_mm ?? null,
+    req.body.short_penetration_reason ?? existing.short_penetration_reason ?? null,
     req.params.id
   );
   res.json(parseSampleRow(db.prepare('SELECT * FROM samples WHERE id = ?').get(req.params.id)));
@@ -1073,7 +1274,10 @@ app.post('/api/boreholes/:boreholeId/tests', writeRoles, (req, res) => {
   const existingRows = db
     .prepare('SELECT depth_from, depth_to FROM tests WHERE borehole_id = ?')
     .all(req.params.boreholeId);
-  const validationError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
+  const validationError = validateDepthInterval({
+    depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+  });
   if (validationError) return res.status(400).json({ error: validationError });
   const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
   if (rangeError) return res.status(400).json({ error: rangeError });
@@ -1132,6 +1336,7 @@ app.put('/api/tests/:id', writeRoles, (req, res) => {
     depthTo: newTo,
     skipReason: skip_reason ?? existing.skip_reason,
     existingRows: otherRows,
+    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b),
   });
   if (validationError) return res.status(400).json({ error: validationError });
   const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });

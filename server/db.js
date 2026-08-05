@@ -199,7 +199,25 @@ db.exec(`
     UNIQUE (category, value)
   );
 
+  -- Values the system derives (penetration rate, SPT end depth, RQD class)
+  -- are not editable in the ordinary flow. When an authorised user does
+  -- override one, the original computed value, the substituted value and the
+  -- stated reason are all kept, so a figure that disagrees with its inputs
+  -- can always be explained.
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    computed_value TEXT,
+    override_value TEXT,
+    reason TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_boreholes_project ON boreholes(project_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
   CREATE INDEX IF NOT EXISTS idx_runs_borehole ON drilling_runs(borehole_id);
   CREATE INDEX IF NOT EXISTS idx_runs_date ON drilling_runs(date);
   CREATE INDEX IF NOT EXISTS idx_lookup_category ON lookup_options(category, status);
@@ -286,6 +304,11 @@ addColumnIfMissing('tests', 'run_id', 'INTEGER REFERENCES drilling_runs(id) ON D
 addColumnIfMissing('boreholes', 'planned_depth', 'REAL');
 addColumnIfMissing('boreholes', 'planned_start_date', 'TEXT');
 addColumnIfMissing('boreholes', 'planned_end_date', 'TEXT');
+
+// Actual SPT penetration and why it fell short of the standard 450 mm. The
+// hole advances by what was actually achieved, not by the nominal drive.
+addColumnIfMissing('samples', 'penetration_achieved_mm', 'REAL');
+addColumnIfMissing('samples', 'short_penetration_reason', 'TEXT');
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_samples_run ON samples(run_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tests_run ON tests(run_id)`);
