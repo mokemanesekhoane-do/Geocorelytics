@@ -64,8 +64,19 @@ jobs:
       - name: Deploy
         if: steps.guard.outputs.ready == 'true'
         env:
-          # Whichever token you created is passed through; the CLI uses the
-          # one that is set. An empty var is ignored.
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-        run: railway up --ci --service Geocorelytics --message "${{ github.event.head_commit.message || 'manual deploy' }}"
+          # Read the secrets under neutral names, then export ONLY the one
+          # that has a value. Exporting both would set the unused one to an
+          # empty string, and the CLI treats a present-but-empty
+          # RAILWAY_TOKEN as an invalid token rather than as unset.
+          PROJECT_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          ACCOUNT_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'manual deploy' }}
+        run: |
+          if [ -n "$PROJECT_TOKEN" ]; then
+            echo "Authenticating with project token (RAILWAY_TOKEN)."
+            export RAILWAY_TOKEN="$PROJECT_TOKEN"
+          else
+            echo "Authenticating with account token (RAILWAY_API_TOKEN)."
+            export RAILWAY_API_TOKEN="$ACCOUNT_TOKEN"
+          fi
+          railway up --ci --service Geocorelytics --message "$(echo "$COMMIT_MESSAGE" | head -n 1)"
