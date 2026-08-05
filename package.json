@@ -4,6 +4,9 @@
   "description": "Geotechnical drilling management system - projects, boreholes, stratigraphy logs, and samples",
   "main": "server/index.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "start": "node server/index.js"
   },
