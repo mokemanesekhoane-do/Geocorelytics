@@ -886,6 +886,10 @@ app.get('/api/boreholes/:boreholeId/next-interval', (req, res) => {
   res.json({
     suggested_from: suggested,
     suggested_source: bottom.source,
+    // How deep the hole actually is, versus how much of it a bit cut. They
+    // differ once a sampler has been driven below the last run, and the
+    // validation keys off the former.
+    hole_bottom: bottom.depth,
     drilled_to: bottom.drilled,
     // The standard 450 mm drive, pre-computed so the form does not have to.
     standard_penetration_mm: derive.SPT_STANDARD_PENETRATION_MM,

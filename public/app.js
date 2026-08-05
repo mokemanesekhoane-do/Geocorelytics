@@ -402,28 +402,44 @@ function renderValidation(box, issues) {
     .join('');
 }
 
-// Shared live validation for sample/test interval forms: depth must sit inside
-// a recorded run and within what has actually been drilled.
+// Live validation for sample/test intervals. Mirrors the server rules exactly:
+// a sampler is driven from the bottom of the hole and penetrates below it, so
+// an interval ending deeper than anything drilled is the normal case, not an
+// error. What is not allowed is starting below the hole bottom, or inside a
+// stretch that was skipped rather than drilled.
 function wireIntervalValidation(form, context) {
   const box = form.querySelector('#interval-validation');
   if (!box) return;
+  const runs = context.runs || [];
+  const bottom = context.hole_bottom ?? context.suggested_from ?? 0;
+
   function check() {
     const from = parseFloat(form.querySelector('[name="depth_from"]')?.value);
     const to = parseFloat(form.querySelector('[name="depth_to"]')?.value);
     const issues = [];
     if (Number.isFinite(from) && Number.isFinite(to)) {
       if (to <= from) issues.push(['error', 'Depth To must be greater than Depth From']);
-      if (context.drilled_to !== undefined && to > context.drilled_to + 1e-9) {
-        issues.push(['error', `Only ${context.drilled_to} m has been drilled. Log the drilling run covering this depth first.`]);
-      }
-      const run = (context.runs || []).find((r) => from >= r.depth_from - 1e-9 && to <= r.depth_to + 1e-9);
-      const overlap = (context.runs || []).find((r) => Math.min(to, r.depth_to) - Math.max(from, r.depth_from) > 0);
-      if (run) {
-        issues.push(['ok', `Within drilling run ${run.run_number ?? run.id} (${run.depth_from}–${run.depth_to} m)${run.operator_name ? ` · ${run.operator_name}` : ''}`]);
-      } else if (overlap) {
-        issues.push(['warn', `Straddles run ${overlap.run_number ?? overlap.id} (${overlap.depth_from}–${overlap.depth_to} m) — it will link to that run`]);
-      } else if ((context.runs || []).length) {
-        issues.push(['error', 'No drilling run covers this interval']);
+
+      if (from > bottom + 1e-9) {
+        issues.push(['error', `The hole has only reached ${bottom} m. Log the drilling run that reaches ${from} m first.`]);
+      } else {
+        const inRun = runs.find((r) => from >= r.depth_from - 1e-9 && from < r.depth_to - 1e-9);
+        const atBottom = Math.abs(from - bottom) < 1e-6;
+        const lastRun = runs.reduce((a, r) => (!a || r.depth_to > a.depth_to ? r : a), null);
+        if (inRun) {
+          issues.push(['ok', `Within drilling run ${inRun.run_number ?? inRun.id} (${inRun.depth_from}–${inRun.depth_to} m)${inRun.operator_name ? ` · ${inRun.operator_name}` : ''}`]);
+        } else if (atBottom && lastRun) {
+          issues.push(['ok', `Driven from the bottom of the hole (${bottom} m) — links to drilling run ${lastRun.run_number ?? lastRun.id}`]);
+        } else if (runs.length) {
+          issues.push(['error', `No drilling run covers ${from} m, and it is not at the bottom of the hole (${bottom} m).`]);
+        } else {
+          issues.push(['error', 'No drilling run has been recorded for this borehole yet.']);
+        }
+        // Advancing the hole is worth stating plainly so the operator knows
+        // the next run will start deeper than the last one ended.
+        if (to > (context.drilled_to ?? bottom) + 1e-9) {
+          issues.push(['ok', `Advances the hole to ${Number(to.toFixed(3))} m — the next drilling run will continue from there`]);
+        }
       }
     }
     box.innerHTML = issues
