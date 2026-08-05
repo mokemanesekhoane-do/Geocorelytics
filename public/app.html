@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GeoCorelytics</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="auth-root" class="auth-root hidden"></div>
+
+  <div class="shell hidden" id="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" />
+      </div>
+
+      <nav class="sidenav" id="sidenav"></nav>
+    </aside>
+
+    <div class="main-col">
+      <header class="topbar">
+        <div class="search-wrap">
+          <span class="search-icon">&#128269;</span>
+          <input id="global-search" type="text" placeholder="Search projects or boreholes&hellip;" autocomplete="off" />
+          <div id="search-results" class="search-results hidden"></div>
+        </div>
+        <div class="topbar-right">
+          <nav id="breadcrumb" class="breadcrumb"></nav>
+          <div class="user-chip" id="user-chip"></div>
+        </div>
+      </header>
+
+      <main id="app" class="app"></main>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
