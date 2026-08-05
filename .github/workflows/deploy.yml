@@ -71,6 +71,7 @@ jobs:
           PROJECT_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           ACCOUNT_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'manual deploy' }}
+          RAILWAY_PROJECT_ID: d1070c51-e3d7-4b88-b46e-99cc8b168259
         run: |
           if [ -n "$PROJECT_TOKEN" ]; then
             echo "Authenticating with project token (RAILWAY_TOKEN)."
@@ -79,4 +80,11 @@ jobs:
             echo "Authenticating with account token (RAILWAY_API_TOKEN)."
             export RAILWAY_API_TOKEN="$ACCOUNT_TOKEN"
           fi
-          railway up --ci --service Geocorelytics --message "$(echo "$COMMIT_MESSAGE" | head -n 1)"
+          # A CI checkout has no linked project, so the target is named
+          # explicitly. A project token implies it, but an account token does
+          # not — passing it works for both.
+          railway up --ci \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment production \
+            --service Geocorelytics \
+            --message "$(echo "$COMMIT_MESSAGE" | head -n 1)"
