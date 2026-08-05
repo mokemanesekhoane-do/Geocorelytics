@@ -259,31 +259,9 @@ section { position: relative; }
   min-height: 500px;
 }
 
-/* The GeoCorelytics mark lives once, in the nav — it stays on screen while
-   scrolling, so repeating it in the hero only competed with the headline. */
-
-/* Mokay attribution: deliberately quiet. The logo is sized off the text
-   cap-height and keeps its aspect ratio (width:auto) so it can't distort. */
-.lp-byline {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  text-decoration: none;
-  color: var(--slate-300);
-  font-size: 0.82rem;
-  letter-spacing: 0.02em;
-  opacity: 0.75;
-  transition: opacity 0.2s ease;
-}
-
-.lp-byline:hover { opacity: 1; }
-
-.lp-byline img {
-  height: 22px;
-  width: auto;
-  display: block;
-  flex-shrink: 0;
-}
+/* Each mark appears once: GeoCorelytics in the nav, where it stays on screen
+   while scrolling, and Mokay in the footer. Repeating either competed with
+   the headline without adding anything. */
 
 .lp-hero-fade {
   position: absolute;
@@ -686,8 +664,6 @@ section { position: relative; }
   .lp-hero-ctas .lp-btn { justify-content: center; }
   .lp-trust-row { gap: 16px 22px; }
   .lp-footer-inner { flex-direction: column; align-items: flex-start; }
-  .lp-byline { font-size: 0.78rem; }
-  .lp-byline img { height: 19px; }
 }
 
 /* The stat card is decorative; below this it costs more height than it earns. */
