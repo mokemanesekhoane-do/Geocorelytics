@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const multer = require('multer');
 const db = require('./db');
+const analytics = require('./analytics');
+const { CATEGORIES: LOOKUP_CATEGORIES } = require('./lookups');
 const {
   hashPassword,
   verifyPassword,
@@ -413,14 +415,17 @@ app.get('/api/projects/:projectId/boreholes', (req, res) => {
 app.post('/api/projects/:projectId/boreholes', writeRoles, (req, res) => {
   const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.projectId);
   if (!project) return notFound(res, 'Project');
-  const { code, easting, northing, elevation, total_depth, drill_method, start_date, end_date, status, notes } =
-    req.body;
+  const {
+    code, easting, northing, elevation, total_depth, drill_method, start_date, end_date, status, notes,
+    planned_depth, planned_start_date, planned_end_date,
+  } = req.body;
   if (!code) return res.status(400).json({ error: 'code is required' });
   const info = db
     .prepare(
       `INSERT INTO boreholes
-        (project_id, code, easting, northing, elevation, total_depth, drill_method, start_date, end_date, status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (project_id, code, easting, northing, elevation, total_depth, drill_method, start_date, end_date, status, notes,
+         planned_depth, planned_start_date, planned_end_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.projectId,
@@ -433,7 +438,10 @@ app.post('/api/projects/:projectId/boreholes', writeRoles, (req, res) => {
       start_date || null,
       end_date || null,
       status || 'Planned',
-      notes || null
+      notes || null,
+      planned_depth ?? null,
+      planned_start_date || null,
+      planned_end_date || null
     );
   const borehole = db.prepare('SELECT * FROM boreholes WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(borehole);
@@ -450,20 +458,13 @@ app.put('/api/boreholes/:id', writeRoles, (req, res) => {
   const existing = db.prepare('SELECT * FROM boreholes WHERE id = ?').get(req.params.id);
   if (!existing) return notFound(res, 'Borehole');
   const {
-    code,
-    easting,
-    northing,
-    elevation,
-    total_depth,
-    drill_method,
-    start_date,
-    end_date,
-    status,
-    notes,
+    code, easting, northing, elevation, total_depth, drill_method, start_date, end_date, status, notes,
+    planned_depth, planned_start_date, planned_end_date,
   } = req.body;
   db.prepare(
     `UPDATE boreholes SET code = ?, easting = ?, northing = ?, elevation = ?, total_depth = ?,
-      drill_method = ?, start_date = ?, end_date = ?, status = ?, notes = ?
+      drill_method = ?, start_date = ?, end_date = ?, status = ?, notes = ?,
+      planned_depth = ?, planned_start_date = ?, planned_end_date = ?
      WHERE id = ?`
   ).run(
     code ?? existing.code,
@@ -476,6 +477,9 @@ app.put('/api/boreholes/:id', writeRoles, (req, res) => {
     end_date ?? null,
     status ?? existing.status,
     notes ?? null,
+    planned_depth ?? null,
+    planned_start_date ?? null,
+    planned_end_date ?? null,
     req.params.id
   );
   res.json(db.prepare('SELECT * FROM boreholes WHERE id = ?').get(req.params.id));
@@ -558,6 +562,244 @@ app.delete('/api/logs/:id', writeRoles, (req, res) => {
   res.status(204).end();
 });
 
+// ---------- Drilling runs ----------
+//
+// The run is the unit of production and the anchor every sample/test hangs
+// off. Runs own depth continuity for the hole; samples and tests are then
+// validated against the run they fall inside.
+
+// Finds the run whose depth interval contains the given interval. Prefers a
+// run that fully contains it; falls back to the run with the largest overlap
+// so a sample straddling a run boundary still links somewhere sensible.
+function resolveRunForDepth(boreholeId, depthFrom, depthTo) {
+  const from = Number(depthFrom);
+  const to = Number(depthTo);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  const runs = db.prepare('SELECT id, depth_from, depth_to FROM drilling_runs WHERE borehole_id = ?').all(boreholeId);
+  const contains = runs.find((r) => from >= r.depth_from - 1e-9 && to <= r.depth_to + 1e-9);
+  if (contains) return contains.id;
+  let best = null;
+  let bestOverlap = 0;
+  for (const r of runs) {
+    const overlap = Math.min(to, r.depth_to) - Math.max(from, r.depth_from);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = r.id;
+    }
+  }
+  return bestOverlap > 0 ? best : null;
+}
+
+// Checks that apply to any depth-interval record measured against the hole
+// itself: inside the borehole's drilled/planned range, and (for samples and
+// tests) covered by a drilling run.
+function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun } = {}) {
+  const bh = db.prepare('SELECT total_depth, planned_depth, code FROM boreholes WHERE id = ?').get(boreholeId);
+  if (!bh) return 'Borehole not found';
+  const from = Number(depthFrom);
+  const to = Number(depthTo);
+  const limit = bh.total_depth ?? bh.planned_depth ?? null;
+  if (limit !== null && to > limit + 1e-9) {
+    return `Depth ${to} m is beyond the borehole's recorded depth (${limit} m). Extend the borehole depth first or correct this entry.`;
+  }
+  if (from < -1e-9) return 'Depth From cannot be negative';
+  if (requireRun) {
+    const runCount = db.prepare('SELECT COUNT(*) c FROM drilling_runs WHERE borehole_id = ?').get(boreholeId).c;
+    if (runCount === 0) {
+      return `No drilling run has been recorded for ${bh.code} yet. Capture the drilling run covering ${from}–${to} m before adding this record.`;
+    }
+    if (resolveRunForDepth(boreholeId, from, to) === null) {
+      return `No drilling run covers ${from}–${to} m. Record the drilling run for this interval first.`;
+    }
+  }
+  return null;
+}
+
+function validateRunData(body, interval) {
+  const cored = Number(body.core_recovered_m);
+  if (Number.isFinite(cored)) {
+    if (cored < 0) return 'Core recovered cannot be negative';
+    if (cored > interval + 1e-6) {
+      return `Core recovered (${cored} m) cannot exceed the drilled interval (${interval.toFixed(2)} m)`;
+    }
+  }
+  const rqd = Number(body.rqd_pct);
+  if (Number.isFinite(rqd) && (rqd < 0 || rqd > 100)) return 'RQD must be between 0 and 100%';
+  const water = Number(body.water_loss_pct);
+  if (Number.isFinite(water) && (water < 0 || water > 100)) return 'Water loss must be between 0 and 100%';
+  for (const key of ['drilling_time_min', 'downtime_min']) {
+    const v = Number(body[key]);
+    if (Number.isFinite(v) && v < 0) return `${key.replace(/_/g, ' ')} cannot be negative`;
+  }
+  return null;
+}
+
+const RUN_FIELDS = [
+  'run_number', 'depth_from', 'depth_to', 'date', 'shift', 'start_time', 'end_time',
+  'drilling_method', 'rig_name', 'operator_name', 'helper_name', 'bit_type', 'core_barrel_type',
+  'core_recovered_m', 'rqd_pct', 'penetration_rate_m_hr', 'drilling_time_min', 'downtime_min',
+  'downtime_reason', 'water_loss_pct', 'groundwater_obs', 'ground_conditions', 'refusal_reason',
+  'drilling_status', 'remarks', 'skip_reason', 'supervisor_name',
+];
+
+// Relinks every sample/test in a borehole to the run covering it. Called after
+// any run is created, edited or deleted so the linkage can never drift.
+function relinkBorehole(boreholeId) {
+  for (const table of ['samples', 'tests']) {
+    const rows = db.prepare(`SELECT id, depth_from, depth_to FROM ${table} WHERE borehole_id = ?`).all(boreholeId);
+    const update = db.prepare(`UPDATE ${table} SET run_id = ? WHERE id = ?`);
+    for (const row of rows) {
+      update.run(resolveRunForDepth(boreholeId, row.depth_from, row.depth_to), row.id);
+    }
+  }
+}
+
+app.get('/api/runs', (req, res) => {
+  const ids = accessibleProjectIds(req.user);
+  const sf = inClauseCol(ids, 'b.project_id');
+  const rows = db
+    .prepare(
+      `SELECT r.*, b.code AS borehole_code, b.project_id, p.name AS project_name
+       FROM drilling_runs r
+       JOIN boreholes b ON b.id = r.borehole_id
+       JOIN projects p ON p.id = b.project_id
+       WHERE 1=1 ${sf.sql}
+       ORDER BY r.date DESC, r.id DESC`
+    )
+    .all(...sf.params);
+  res.json(rows);
+});
+
+app.get('/api/boreholes/:boreholeId/runs', (req, res) => {
+  const projectId = getProjectIdForBorehole(req.params.boreholeId);
+  if (projectId === null) return notFound(res, 'Borehole');
+  if (!canAccessProject(req.user, projectId)) return forbidden(res);
+  res.json(
+    db.prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_from ASC, id ASC').all(req.params.boreholeId)
+  );
+});
+
+// Everything the capture form needs to prefill itself: where the hole is at,
+// what the last run used, and the next run number.
+app.get('/api/boreholes/:boreholeId/next-run', (req, res) => {
+  const projectId = getProjectIdForBorehole(req.params.boreholeId);
+  if (projectId === null) return notFound(res, 'Borehole');
+  if (!canAccessProject(req.user, projectId)) return forbidden(res);
+  const bh = db.prepare('SELECT * FROM boreholes WHERE id = ?').get(req.params.boreholeId);
+  const last = db
+    .prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_to DESC, id DESC LIMIT 1')
+    .get(req.params.boreholeId);
+  const maxRunNo = db
+    .prepare('SELECT MAX(run_number) AS n FROM drilling_runs WHERE borehole_id = ?')
+    .get(req.params.boreholeId).n;
+  res.json({
+    run_number: (maxRunNo || 0) + 1,
+    depth_from: last ? last.depth_to : 0,
+    target_depth: bh.planned_depth ?? bh.total_depth ?? null,
+    defaults: {
+      drilling_method: last?.drilling_method ?? bh.drill_method ?? null,
+      rig_name: last?.rig_name ?? null,
+      operator_name: last?.operator_name ?? null,
+      helper_name: last?.helper_name ?? null,
+      shift: last?.shift ?? null,
+      bit_type: last?.bit_type ?? null,
+      core_barrel_type: last?.core_barrel_type ?? null,
+    },
+    last_run: last || null,
+  });
+});
+
+// Where the next sample/test should start, and which run covers it.
+app.get('/api/boreholes/:boreholeId/next-interval', (req, res) => {
+  const projectId = getProjectIdForBorehole(req.params.boreholeId);
+  if (projectId === null) return notFound(res, 'Borehole');
+  if (!canAccessProject(req.user, projectId)) return forbidden(res);
+  const kind = req.query.kind === 'test' ? 'tests' : 'samples';
+  const last = db
+    .prepare(`SELECT depth_to FROM ${kind} WHERE borehole_id = ? ORDER BY depth_to DESC LIMIT 1`)
+    .get(req.params.boreholeId);
+  const lastRun = db
+    .prepare('SELECT depth_to FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_to DESC LIMIT 1')
+    .get(req.params.boreholeId);
+  const suggested = last ? last.depth_to : 0;
+  const runs = db.prepare('SELECT * FROM drilling_runs WHERE borehole_id = ? ORDER BY depth_from ASC').all(req.params.boreholeId);
+  const run = runs.find((r) => suggested >= r.depth_from - 1e-9 && suggested < r.depth_to + 1e-9) || null;
+  res.json({
+    suggested_from: suggested,
+    drilled_to: lastRun ? lastRun.depth_to : 0,
+    run,
+    runs,
+    defaults: run
+      ? { operator_name: run.operator_name, date: run.date, drilling_method: run.drilling_method, rig_name: run.rig_name, shift: run.shift }
+      : {},
+  });
+});
+
+app.post('/api/boreholes/:boreholeId/runs', writeRoles, (req, res) => {
+  const borehole = db.prepare('SELECT id FROM boreholes WHERE id = ?').get(req.params.boreholeId);
+  if (!borehole) return notFound(res, 'Borehole');
+  const { depth_from, depth_to, skip_reason } = req.body;
+  if (depth_from === undefined || depth_from === null || depth_to === undefined || depth_to === null) {
+    return res.status(400).json({ error: 'depth_from and depth_to are required' });
+  }
+  const existingRows = db
+    .prepare('SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ?')
+    .all(req.params.boreholeId);
+  const depthError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
+  if (depthError) return res.status(400).json({ error: depthError });
+  const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: false });
+  if (rangeError) return res.status(400).json({ error: rangeError });
+  const dataError = validateRunData(req.body, Number(depth_to) - Number(depth_from));
+  if (dataError) return res.status(400).json({ error: dataError });
+
+  const values = RUN_FIELDS.map((f) => (req.body[f] === undefined || req.body[f] === '' ? null : req.body[f]));
+  const info = db
+    .prepare(
+      `INSERT INTO drilling_runs (borehole_id, ${RUN_FIELDS.join(', ')}, approved_at, created_by)
+       VALUES (?, ${RUN_FIELDS.map(() => '?').join(', ')}, ?, ?)`
+    )
+    .run(req.params.boreholeId, ...values, req.body.supervisor_name ? new Date().toISOString() : null, req.user.id);
+  relinkBorehole(req.params.boreholeId);
+  res.status(201).json(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.put('/api/runs/:id', writeRoles, (req, res) => {
+  const existing = db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(req.params.id);
+  if (!existing) return notFound(res, 'Drilling run');
+  const newFrom = req.body.depth_from ?? existing.depth_from;
+  const newTo = req.body.depth_to ?? existing.depth_to;
+  const otherRows = db
+    .prepare('SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ? AND id != ?')
+    .all(existing.borehole_id, req.params.id);
+  const depthError = validateDepthInterval({
+    depthFrom: newFrom,
+    depthTo: newTo,
+    skipReason: req.body.skip_reason ?? existing.skip_reason,
+    existingRows: otherRows,
+  });
+  if (depthError) return res.status(400).json({ error: depthError });
+  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: false });
+  if (rangeError) return res.status(400).json({ error: rangeError });
+  const dataError = validateRunData({ ...existing, ...req.body }, Number(newTo) - Number(newFrom));
+  if (dataError) return res.status(400).json({ error: dataError });
+
+  const values = RUN_FIELDS.map((f) => (req.body[f] === undefined ? existing[f] : req.body[f] === '' ? null : req.body[f]));
+  const supervisor = req.body.supervisor_name ?? existing.supervisor_name;
+  db.prepare(
+    `UPDATE drilling_runs SET ${RUN_FIELDS.map((f) => `${f} = ?`).join(', ')}, approved_at = ? WHERE id = ?`
+  ).run(...values, supervisor ? existing.approved_at || new Date().toISOString() : null, req.params.id);
+  relinkBorehole(existing.borehole_id);
+  res.json(db.prepare('SELECT * FROM drilling_runs WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/runs/:id', writeRoles, (req, res) => {
+  const existing = db.prepare('SELECT borehole_id FROM drilling_runs WHERE id = ?').get(req.params.id);
+  if (!existing) return notFound(res, 'Drilling run');
+  db.prepare('DELETE FROM drilling_runs WHERE id = ?').run(req.params.id);
+  relinkBorehole(existing.borehole_id);
+  res.status(204).end();
+});
+
 // ---------- Samples ----------
 
 function parseSampleRow(row) {
@@ -628,17 +870,20 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
     .all(req.params.boreholeId);
   const depthError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
   if (depthError) return res.status(400).json({ error: depthError });
+  const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
+  if (rangeError) return res.status(400).json({ error: rangeError });
   const parsedSampleData = typeof sample_data === 'string' ? JSON.parse(sample_data || '{}') : sample_data || {};
   const dataError = validateSampleData(sample_type, parsedSampleData);
   if (dataError) return res.status(400).json({ error: dataError });
+  const runId = resolveRunForDepth(req.params.boreholeId, depth_from, depth_to);
   const approvedAt = supervisor_name ? new Date().toISOString() : null;
   const info = db
     .prepare(
       `INSERT INTO samples
         (borehole_id, depth, depth_from, depth_to, sample_type, spt_n_value, recovery_pct, lab_status, notes,
          skip_reason, sample_ref, date, time, operator_name, supervisor_name, approved_at, groundwater_obs,
-         description, sample_data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         description, sample_data, run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.boreholeId,
@@ -659,7 +904,8 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
       approvedAt,
       groundwater_obs || null,
       description || null,
-      toJsonText(sample_data)
+      toJsonText(sample_data),
+      runId
     );
   const sample = db.prepare('SELECT * FROM samples WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(parseSampleRow(sample));
@@ -698,6 +944,8 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     existingRows: otherRows,
   });
   if (depthError) return res.status(400).json({ error: depthError });
+  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });
+  if (rangeError) return res.status(400).json({ error: rangeError });
   const newSampleType = sample_type ?? existing.sample_type;
   const parsedSampleData =
     sample_data !== undefined
@@ -711,7 +959,7 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
   db.prepare(
     `UPDATE samples SET depth = ?, depth_from = ?, depth_to = ?, sample_type = ?, spt_n_value = ?, recovery_pct = ?,
       lab_status = ?, notes = ?, skip_reason = ?, sample_ref = ?, date = ?, time = ?, operator_name = ?,
-      supervisor_name = ?, approved_at = ?, groundwater_obs = ?, description = ?, sample_data = ?
+      supervisor_name = ?, approved_at = ?, groundwater_obs = ?, description = ?, sample_data = ?, run_id = ?
      WHERE id = ?`
   ).run(
     newFrom,
@@ -732,6 +980,7 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     groundwater_obs ?? null,
     description ?? null,
     sample_data !== undefined ? toJsonText(sample_data) : existing.sample_data,
+    resolveRunForDepth(existing.borehole_id, newFrom, newTo),
     req.params.id
   );
   res.json(parseSampleRow(db.prepare('SELECT * FROM samples WHERE id = ?').get(req.params.id)));
@@ -809,13 +1058,15 @@ app.post('/api/boreholes/:boreholeId/tests', writeRoles, (req, res) => {
     .all(req.params.boreholeId);
   const validationError = validateDepthInterval({ depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows });
   if (validationError) return res.status(400).json({ error: validationError });
+  const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
+  if (rangeError) return res.status(400).json({ error: rangeError });
   const approvedAt = supervisor_name ? new Date().toISOString() : null;
   const info = db
     .prepare(
       `INSERT INTO tests
         (borehole_id, test_type, date, depth_from, depth_to, result_value, result_unit, conducted_by, notes,
-         test_data, skip_reason, test_ref, supervisor_name, approved_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         test_data, skip_reason, test_ref, supervisor_name, approved_at, run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.boreholeId,
@@ -831,7 +1082,8 @@ app.post('/api/boreholes/:boreholeId/tests', writeRoles, (req, res) => {
       skip_reason || null,
       test_ref || null,
       supervisor_name || null,
-      approvedAt
+      approvedAt,
+      resolveRunForDepth(req.params.boreholeId, depth_from, depth_to)
     );
   res.status(201).json(parseTestRow(db.prepare('SELECT * FROM tests WHERE id = ?').get(info.lastInsertRowid)));
 });
@@ -865,11 +1117,13 @@ app.put('/api/tests/:id', writeRoles, (req, res) => {
     existingRows: otherRows,
   });
   if (validationError) return res.status(400).json({ error: validationError });
+  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });
+  if (rangeError) return res.status(400).json({ error: rangeError });
   const approvedAt = supervisor_name ? existing.approved_at || new Date().toISOString() : null;
   db.prepare(
     `UPDATE tests SET test_type = ?, date = ?, depth_from = ?, depth_to = ?, result_value = ?,
       result_unit = ?, conducted_by = ?, notes = ?, test_data = ?, skip_reason = ?, test_ref = ?,
-      supervisor_name = ?, approved_at = ? WHERE id = ?`
+      supervisor_name = ?, approved_at = ?, run_id = ? WHERE id = ?`
   ).run(
     test_type ?? existing.test_type,
     date ?? null,
@@ -884,6 +1138,7 @@ app.put('/api/tests/:id', writeRoles, (req, res) => {
     test_ref ?? null,
     supervisor_name ?? null,
     approvedAt,
+    resolveRunForDepth(existing.borehole_id, newFrom, newTo),
     req.params.id
   );
   res.json(parseTestRow(db.prepare('SELECT * FROM tests WHERE id = ?').get(req.params.id)));
@@ -1208,6 +1463,103 @@ app.delete('/api/timesheets/:id', requireRole('Admin', 'Field'), (req, res) => {
   const info = db.prepare('DELETE FROM timesheets WHERE id = ?').run(req.params.id);
   if (info.changes === 0) return notFound(res, 'Timesheet');
   res.status(204).end();
+});
+
+// ---------- Controlled vocabularies ----------
+//
+// Approved values are what operators pick from. An operator choosing "Other"
+// submits a Pending value: it is stored and usable on that record immediately
+// (the field work must not block on an approval), but it stays out of everyone
+// else's dropdown until a supervisor approves it.
+
+app.get('/api/lookups', (req, res) => {
+  const rows = db
+    .prepare(`SELECT id, category, value, status, is_seed, usage_count FROM lookup_options WHERE status = 'Approved' ORDER BY category, sort_order, value`)
+    .all();
+  const grouped = {};
+  for (const row of rows) {
+    (grouped[row.category] = grouped[row.category] || []).push(row);
+  }
+  res.json({ categories: LOOKUP_CATEGORIES, options: grouped });
+});
+
+app.get('/api/lookups/pending', requireRole('Admin', 'Field'), (req, res) => {
+  res.json(
+    db
+      .prepare(
+        `SELECT l.*, u.name AS created_by_name
+         FROM lookup_options l LEFT JOIN users u ON u.id = l.created_by
+         WHERE l.status = 'Pending' ORDER BY l.created_at DESC`
+      )
+      .all()
+  );
+});
+
+app.post('/api/lookups', writeRoles, (req, res) => {
+  const { category, value } = req.body;
+  if (!category || !value) return res.status(400).json({ error: 'category and value are required' });
+  if (!LOOKUP_CATEGORIES[category]) return res.status(400).json({ error: `Unknown lookup category "${category}"` });
+  const clean = String(value).trim();
+  if (!clean) return res.status(400).json({ error: 'Value cannot be blank' });
+  const existing = db.prepare('SELECT * FROM lookup_options WHERE category = ? AND value = ? COLLATE NOCASE').get(category, clean);
+  if (existing) {
+    return res.status(existing.status === 'Approved' ? 200 : 409).json(
+      existing.status === 'Approved'
+        ? existing
+        : { error: `"${clean}" has already been submitted and is awaiting approval`, option: existing }
+    );
+  }
+  // Admins curate the vocabulary, so their additions are approved on the spot.
+  const autoApprove = req.user.role === 'Admin';
+  const info = db
+    .prepare(
+      `INSERT INTO lookup_options (category, value, status, is_seed, created_by, approved_by, approved_at)
+       VALUES (?, ?, ?, 0, ?, ?, ?)`
+    )
+    .run(
+      category,
+      clean,
+      autoApprove ? 'Approved' : 'Pending',
+      req.user.id,
+      autoApprove ? req.user.id : null,
+      autoApprove ? new Date().toISOString() : null
+    );
+  res.status(201).json(db.prepare('SELECT * FROM lookup_options WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.put('/api/lookups/:id/review', requireRole('Admin'), (req, res) => {
+  const { decision, review_note } = req.body;
+  if (!['Approved', 'Rejected'].includes(decision)) {
+    return res.status(400).json({ error: 'decision must be "Approved" or "Rejected"' });
+  }
+  const existing = db.prepare('SELECT * FROM lookup_options WHERE id = ?').get(req.params.id);
+  if (!existing) return notFound(res, 'Lookup option');
+  db.prepare(`UPDATE lookup_options SET status = ?, approved_by = ?, approved_at = ?, review_note = ? WHERE id = ?`).run(
+    decision,
+    req.user.id,
+    new Date().toISOString(),
+    review_note || null,
+    req.params.id
+  );
+  res.json(db.prepare('SELECT * FROM lookup_options WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/lookups/:id', requireRole('Admin'), (req, res) => {
+  const existing = db.prepare('SELECT is_seed FROM lookup_options WHERE id = ?').get(req.params.id);
+  if (!existing) return notFound(res, 'Lookup option');
+  if (existing.is_seed) return res.status(400).json({ error: 'Standard seeded values cannot be deleted' });
+  db.prepare('DELETE FROM lookup_options WHERE id = ?').run(req.params.id);
+  res.status(204).end();
+});
+
+// ---------- Analytics ----------
+
+app.get('/api/analytics', (req, res) => {
+  const filters = {};
+  for (const key of ['project_id', 'borehole_id', 'rig', 'operator', 'shift', 'drilling_method', 'date_from', 'date_to', 'sample_type', 'test_type']) {
+    if (req.query[key]) filters[key] = req.query[key];
+  }
+  res.json(analytics.compute(db, filters, accessibleProjectIds(req.user)));
 });
 
 // ---------- Attachments ----------

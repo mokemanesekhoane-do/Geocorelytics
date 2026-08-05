@@ -117,6 +117,13 @@ function fmt(val, suffix) {
   return esc(val) + (suffix || '');
 }
 
+// A bare <input type="number"> defaults to step=1, which silently rejects
+// decimal depths like 1.6 m. Every numeric field in this app is a real
+// measurement, so they all accept decimals.
+function numStep(type) {
+  return type === 'number' ? ' step="any"' : '';
+}
+
 // ---------- Depth continuity helpers (stratigraphy log + in-situ tests) ----------
 
 function lastEndDepth(rows) {
@@ -153,6 +160,196 @@ function wireDepthContinuity(form, lastEnd) {
   }
   fromInput.addEventListener('input', update);
   update();
+}
+
+// ================================================================
+// Drilling runs — the unit of production
+//
+// Every sample and test is captured *within* a run, so the run form is the
+// one place the shared context (date, shift, rig, method, operator) is
+// entered. Subsequent forms inherit it rather than asking again.
+// ================================================================
+
+const RUN_FIELD_GROUPS = [
+  {
+    title: 'Shift & crew',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date' },
+      { name: 'shift', label: 'Shift', lookup: 'shift' },
+      { name: 'start_time', label: 'Start Time', type: 'time' },
+      { name: 'end_time', label: 'End Time', type: 'time' },
+      { name: 'rig_name', label: 'Drilling Rig', type: 'text', placeholder: 'e.g. Rig-07' },
+      { name: 'operator_name', label: 'Operator', type: 'text' },
+      { name: 'helper_name', label: 'Assistant / Helper', type: 'text' },
+      { name: 'drilling_status', label: 'Drilling Status', lookup: 'drilling_status' },
+    ],
+  },
+  {
+    title: 'Method & tooling',
+    fields: [
+      { name: 'drilling_method', label: 'Drilling Method', lookup: 'drilling_method' },
+      { name: 'bit_type', label: 'Bit Type', type: 'text' },
+      { name: 'core_barrel_type', label: 'Core Barrel Type', type: 'text' },
+    ],
+  },
+  {
+    title: 'Recovery & rate',
+    fields: [
+      { name: 'core_recovered_m', label: 'Core Recovered (m)', type: 'number' },
+      { name: 'rqd_pct', label: 'RQD (%)', type: 'number' },
+      { name: 'penetration_rate_m_hr', label: 'Penetration Rate (m/h)', type: 'number' },
+      { name: 'drilling_time_min', label: 'Drilling Time (min)', type: 'number' },
+      { name: 'recovery_quality', label: 'Recovery Quality', lookup: 'recovery_quality', dataOnly: true },
+      { name: 'fracture_condition', label: 'Fracture Condition', lookup: 'fracture_condition', dataOnly: true },
+    ],
+  },
+  {
+    title: 'Ground & water',
+    fields: [
+      { name: 'ground_conditions', label: 'Ground Conditions', lookup: 'soil_type' },
+      { name: 'groundwater_obs', label: 'Groundwater Observation', lookup: 'groundwater_obs' },
+      { name: 'water_loss_pct', label: 'Water Loss (%)', type: 'number' },
+    ],
+  },
+  {
+    title: 'Delays & close-out',
+    fields: [
+      { name: 'downtime_min', label: 'Downtime (min)', type: 'number' },
+      { name: 'downtime_reason', label: 'Downtime Reason', lookup: 'downtime_reason' },
+      { name: 'refusal_reason', label: 'Refusal Reason', lookup: 'refusal_reason' },
+      { name: 'supervisor_name', label: 'Supervisor Verification', type: 'text', placeholder: 'Supervisor name to approve' },
+      { name: 'remarks', label: 'Remarks', lookup: 'standard_remarks', full: true },
+    ],
+  },
+];
+
+function runFieldHtml(f, value) {
+  if (f.lookup) return lookupSelectHtml(f.lookup, f.name, value, { label: f.label, full: f.full });
+  const wrap = f.full ? 'full' : '';
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" /></div>`;
+}
+
+// `prefill` comes from /next-run: the last run's context, so the operator
+// confirms rather than retypes.
+function runModalFieldsHtml(prefill, existing) {
+  existing = existing || {};
+  const val = (name) => existing[name] ?? prefill.defaults?.[name] ?? '';
+  const lastEnd = existing.depth_from ?? prefill.depth_from ?? 0;
+  const runNo = existing.run_number ?? prefill.run_number;
+  return `
+    <div><label>Run Number</label><input type="number" step="1" name="run_number" value="${esc(runNo)}" /></div>
+    <div class="item"><span class="label">Target depth</span>${prefill.target_depth ? `${prefill.target_depth} m` : '&mdash;'}</div>
+    ${depthFieldsHtml(lastEnd, existing)}
+    <div class="full" id="run-validation"></div>
+    ${RUN_FIELD_GROUPS.map(
+      (g) => `<div class="full form-section-title">${esc(g.title)}</div>` +
+        g.fields.filter((f) => !f.dataOnly).map((f) => runFieldHtml(f, existing[f.name] ?? (f.name === 'date' ? val('date') || todayStr() : val(f.name)))).join('')
+    ).join('')}
+  `;
+}
+
+async function openRunModal(boreholeId, existing, onSaved) {
+  const prefill = existing
+    ? { depth_from: existing.depth_from, run_number: existing.run_number, target_depth: null, defaults: {} }
+    : await api('GET', `/api/boreholes/${boreholeId}/next-run`);
+  const lastEnd = existing ? existing.depth_from : prefill.depth_from;
+  const form = openModal({
+    title: existing ? `Edit Drilling Run ${existing.run_number ?? ''}` : `New Drilling Run ${prefill.run_number}`,
+    submitLabel: existing ? 'Save Run' : 'Log Run',
+    fieldsHtml: runModalFieldsHtml(prefill, existing),
+    onSubmit: async (data) => {
+      const saved = existing
+        ? await api('PUT', `/api/runs/${existing.id}`, data)
+        : await api('POST', `/api/boreholes/${boreholeId}/runs`, data);
+      await submitCustomLookups(form);
+      toast(existing ? 'Drilling run updated' : 'Drilling run logged');
+      if (onSaved) await onSaved(saved);
+    },
+  });
+  wireDepthContinuity(form, lastEnd);
+  wireLookups(form);
+  wireRunValidation(form, prefill.target_depth);
+  return form;
+}
+
+// Live checks mirroring the server's rules, so the operator is told at the
+// point of entry rather than on submit.
+function wireRunValidation(form, targetDepth) {
+  const box = form.querySelector('#run-validation');
+  if (!box) return;
+  const get = (n) => form.querySelector(`[name="${n}"]`);
+  function check() {
+    const from = parseFloat(get('depth_from')?.value);
+    const to = parseFloat(get('depth_to')?.value);
+    const core = parseFloat(get('core_recovered_m')?.value);
+    const rqd = parseFloat(get('rqd_pct')?.value);
+    const issues = [];
+    if (Number.isFinite(from) && Number.isFinite(to)) {
+      if (to <= from) issues.push(['error', 'Depth To must be greater than Depth From']);
+      const interval = to - from;
+      if (Number.isFinite(core) && core > interval + 1e-6) {
+        issues.push(['error', `Core recovered (${core} m) exceeds the drilled interval (${interval.toFixed(2)} m)`]);
+      }
+      if (Number.isFinite(core) && interval > 0 && core / interval < 0.7) {
+        issues.push(['warn', `Core recovery is ${((core / interval) * 100).toFixed(0)}% — low for this interval`]);
+      }
+      if (targetDepth && to > targetDepth + 1e-9) {
+        issues.push(['error', `Depth ${to} m is beyond the borehole target depth (${targetDepth} m)`]);
+      }
+      if (interval > 6) issues.push(['warn', `Run length is ${interval.toFixed(2)} m — unusually long, please confirm`]);
+    }
+    if (Number.isFinite(rqd) && (rqd < 0 || rqd > 100)) issues.push(['error', 'RQD must be between 0 and 100%']);
+    renderValidation(box, issues);
+  }
+  form.addEventListener('input', check);
+  form.addEventListener('lookup-change', check);
+  check();
+}
+
+function renderValidation(box, issues) {
+  if (!issues.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = issues
+    .map(([kind, msg]) => `<div class="validation-msg ${kind === 'error' ? 'is-error' : 'is-warn'}">${kind === 'error' ? '&#9888;' : '&#9432;'} ${esc(msg)}</div>`)
+    .join('');
+}
+
+// Shared live validation for sample/test interval forms: depth must sit inside
+// a recorded run and within what has actually been drilled.
+function wireIntervalValidation(form, context) {
+  const box = form.querySelector('#interval-validation');
+  if (!box) return;
+  function check() {
+    const from = parseFloat(form.querySelector('[name="depth_from"]')?.value);
+    const to = parseFloat(form.querySelector('[name="depth_to"]')?.value);
+    const issues = [];
+    if (Number.isFinite(from) && Number.isFinite(to)) {
+      if (to <= from) issues.push(['error', 'Depth To must be greater than Depth From']);
+      if (context.drilled_to !== undefined && to > context.drilled_to + 1e-9) {
+        issues.push(['error', `Only ${context.drilled_to} m has been drilled. Log the drilling run covering this depth first.`]);
+      }
+      const run = (context.runs || []).find((r) => from >= r.depth_from - 1e-9 && to <= r.depth_to + 1e-9);
+      const overlap = (context.runs || []).find((r) => Math.min(to, r.depth_to) - Math.max(from, r.depth_from) > 0);
+      if (run) {
+        issues.push(['ok', `Within drilling run ${run.run_number ?? run.id} (${run.depth_from}–${run.depth_to} m)${run.operator_name ? ` · ${run.operator_name}` : ''}`]);
+      } else if (overlap) {
+        issues.push(['warn', `Straddles run ${overlap.run_number ?? overlap.id} (${overlap.depth_from}–${overlap.depth_to} m) — it will link to that run`]);
+      } else if ((context.runs || []).length) {
+        issues.push(['error', 'No drilling run covers this interval']);
+      }
+    }
+    box.innerHTML = issues
+      .map(([kind, msg]) => {
+        const cls = kind === 'error' ? 'is-error' : kind === 'warn' ? 'is-warn' : 'is-ok';
+        const icon = kind === 'error' ? '&#9888;' : kind === 'warn' ? '&#9432;' : '&#10003;';
+        return `<div class="validation-msg ${cls}">${icon} ${esc(msg)}</div>`;
+      })
+      .join('');
+  }
+  form.addEventListener('input', check);
+  check();
 }
 
 // ================================================================
@@ -448,19 +645,15 @@ const SAMPLE_TYPES = {
     resultLabel: 'Recovery %',
     formulaNote: 'Recovery % = recovered length ÷ penetration length. Recovered length cannot exceed penetration length.',
     fields: [
-      { name: 'sampling_method', label: 'Sampling Method', type: 'select', options: ['Shelby Push', 'Piston Sampler', 'Rotary Core', 'Hand Carved', 'Other'] },
+      { name: 'sampling_method', label: 'Sampling Method', lookup: 'drilling_method' },
       { name: 'sampler_dimensions', label: 'Sampler Dimensions', type: 'text', placeholder: 'e.g. 76 x 600 mm' },
       { name: 'penetration_length_mm', label: 'Penetration Length (mm)', type: 'number' },
       { name: 'recovery_length_mm', label: 'Sample Recovery Length (mm)', type: 'number' },
       { name: 'sample_diameter_mm', label: 'Sample Diameter (mm)', type: 'number' },
-      { name: 'soil_classification', label: 'Soil Classification', type: 'text', placeholder: 'e.g. CL, SM' },
-      {
-        name: 'material_consistency',
-        label: 'Material Consistency',
-        type: 'select',
-        options: ['Very Soft', 'Soft', 'Firm', 'Stiff', 'Very Stiff', 'Hard', 'Loose', 'Medium Dense', 'Dense'],
-      },
-      { name: 'moisture_condition', label: 'Moisture Condition', type: 'select', options: ['Dry', 'Moist', 'Wet', 'Saturated'] },
+      { name: 'soil_classification', label: 'Soil Classification (USCS)', lookup: 'uscs_class' },
+      { name: 'material_consistency', label: 'Material Consistency', lookup: 'consistency' },
+      { name: 'material_density', label: 'Material Density (granular)', lookup: 'density' },
+      { name: 'moisture_condition', label: 'Moisture Condition', lookup: 'moisture' },
       {
         name: 'sample_quality_rating',
         label: 'Sample Quality Rating',
@@ -495,6 +688,11 @@ const SAMPLE_TYPES = {
 function sampleFieldInputHtml(f, value) {
   const wrap = f.full ? 'full' : '';
   value = value ?? '';
+  // Lookup-backed fields become searchable dropdowns over the controlled
+  // vocabulary instead of free text.
+  if (f.lookup) {
+    return lookupSelectHtml(f.lookup, `sf_${f.name}`, value, { label: f.label, full: f.full });
+  }
   if (f.type === 'select') {
     return `<div class="${wrap}"><label>${esc(f.label)}</label><select name="sf_${f.name}">${f.options
       .map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`)
@@ -503,7 +701,7 @@ function sampleFieldInputHtml(f, value) {
   if (f.type === 'textarea') {
     return `<div class="${wrap}"><label>${esc(f.label)}</label><textarea name="sf_${f.name}">${esc(value)}</textarea></div>`;
   }
-  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}" name="sf_${f.name}" placeholder="${esc(f.placeholder || '')}" value="${esc(value)}" /></div>`;
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="sf_${f.name}" placeholder="${esc(f.placeholder || '')}" value="${esc(value)}" /></div>`;
 }
 
 function sampleTypeFieldsHtml(sampleType, existingData) {
@@ -573,6 +771,7 @@ function sampleModalFieldsHtml(lastEnd, existing) {
     <div><label>Date</label><input type="date" name="date" value="${esc(existing.date || todayStr())}" /></div>
     <div><label>Time</label><input type="time" name="time" value="${esc(existing.time || '')}" /></div>
     ${depthFieldsHtml(lastEnd, existing)}
+    <div class="full" id="interval-validation"></div>
     <div class="full" id="sample-type-fields-wrap">
       <div class="form-grid" id="sample-type-fields">${sampleTypeFieldsHtml(sampleType, existingData)}</div>
     </div>
@@ -580,7 +779,7 @@ function sampleModalFieldsHtml(lastEnd, existing) {
       Enter readings above to calculate the result.
     </div>
     <div class="full"><label>Soil / Material Description</label><textarea name="description">${esc(existing.description || '')}</textarea></div>
-    <div><label>Groundwater Observations</label><input name="groundwater_obs" value="${esc(existing.groundwater_obs || '')}" /></div>
+    ${lookupSelectHtml('groundwater_obs', 'groundwater_obs', existing.groundwater_obs, { label: 'Groundwater Observations' })}
     <div>
       <label>Lab Status</label>
       <select name="lab_status">
@@ -597,16 +796,19 @@ function sampleModalFieldsHtml(lastEnd, existing) {
   `;
 }
 
-function wireSampleModal(form, lastEnd) {
+function wireSampleModal(form, lastEnd, context) {
   wireDepthContinuity(form, lastEnd);
+  wireLookups(form);
   const typeSelect = form.querySelector('#sample-type-select');
   const fieldsContainer = form.querySelector('#sample-type-fields');
   function rebuild() {
     fieldsContainer.innerHTML = sampleTypeFieldsHtml(typeSelect.value, {});
+    wireLookups(form);
     wireSampleTypeCalc(form, typeSelect.value);
   }
   typeSelect.addEventListener('change', rebuild);
   wireSampleTypeCalc(form, typeSelect.value);
+  if (context) wireIntervalValidation(form, context);
 }
 
 // ================================================================
@@ -771,7 +973,7 @@ function hseFieldInputHtml(f, value) {
   if (f.type === 'textarea') {
     return `<div class="${wrap}"><label>${esc(f.label)}</label><textarea name="hf_${f.name}">${esc(value)}</textarea></div>`;
   }
-  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}" name="hf_${f.name}" value="${esc(value)}" /></div>`;
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="hf_${f.name}" value="${esc(value)}" /></div>`;
 }
 
 function hseCategoryFieldsHtml(category, details) {
@@ -894,6 +1096,7 @@ async function boot() {
     if (status.needsSetup) return showSetupScreen();
     if (!status.user) return showLoginScreen();
     currentUser = status.user;
+    await loadLookups();
     showApp();
   } catch (err) {
     showAuth(`
@@ -941,6 +1144,7 @@ function showLoginScreen(errorMsg) {
     try {
       const user = await api('POST', '/api/auth/login', data);
       currentUser = user;
+      await loadLookups();
       showApp();
     } catch (err) {
       showLoginScreen(err.message);
@@ -971,6 +1175,7 @@ function showSetupScreen(errorMsg) {
     try {
       const user = await api('POST', '/api/auth/setup', data);
       currentUser = user;
+      await loadLookups();
       showApp();
     } catch (err) {
       showSetupScreen(err.message);
@@ -1010,6 +1215,7 @@ function renderSidenav() {
   html += [
     { key: 'dashboard', href: '#/', icon: '&#9635;', label: 'Dashboard' },
     { key: 'projects', href: '#/projects', icon: '&#128193;', label: 'Projects' },
+    { key: 'analytics', href: '#/analytics', icon: '&#128200;', label: 'Analytics' },
   ]
     .map(navLink)
     .join('');
@@ -1030,6 +1236,7 @@ function renderSidenav() {
   if (isAdmin()) {
     html += `<div class="nav-section-label">Admin</div>`;
     html += navLink({ key: 'users', href: '#/users', icon: '&#128100;', label: 'Users' });
+    html += navLink({ key: 'lookups', href: '#/lookups', icon: '&#128203;', label: 'Vocabularies' });
   }
 
   document.getElementById('sidenav').innerHTML = html;
@@ -1168,10 +1375,19 @@ async function router() {
       if (!canWrite()) return accessDenied();
       return await renderTimesheetsRegister();
     }
+    if (hash.startsWith('/analytics')) {
+      setActiveNav('analytics');
+      return await renderAnalyticsPage();
+    }
     if (hash === '/users') {
       setActiveNav('users');
       if (!isAdmin()) return accessDenied();
       return await renderUsersPage();
+    }
+    if (hash === '/lookups') {
+      setActiveNav('lookups');
+      if (!isAdmin()) return accessDenied();
+      return await renderLookupsPage();
     }
     setActiveNav('dashboard');
     if (currentUser.role === 'Field') return await renderFieldDashboard();
@@ -1729,6 +1945,9 @@ async function renderProjectDetail(id) {
           <div><label>Northing</label><input type="number" step="any" name="northing" /></div>
           <div><label>Elevation (m)</label><input type="number" step="any" name="elevation" /></div>
           <div><label>Total Depth (m)</label><input type="number" step="any" name="total_depth" /></div>
+          <div><label>Planned Depth (m)</label><input type="number" step="any" name="planned_depth" placeholder="Target for progress tracking" /></div>
+          <div><label>Planned Start</label><input type="date" name="planned_start_date" /></div>
+          <div><label>Planned End</label><input type="date" name="planned_end_date" /></div>
           <div><label>Drilling Method</label><input name="drill_method" placeholder="e.g. Rotary, Auger, SPT" /></div>
           <div><label>Start Date</label><input type="date" name="start_date" /></div>
           <div><label>End Date</label><input type="date" name="end_date" /></div>
@@ -1889,12 +2108,71 @@ async function renderAttachments(container, entityType, entityId) {
 // Borehole detail
 // ================================================================
 
+// Live progress panel for one borehole — every figure derives from the runs
+// and samples actually captured, so it moves the moment data is logged.
+function boreholeProgressHtml(a, borehole) {
+  const c = (a.completion || []).find((x) => x.borehole_id === borehole.id) || {};
+  const h = a.headline || {};
+  const dailyPoints = (a.production?.daily || []).map((d) => ({ x: d.x, y: d.y, cumulative: d.cumulative, meta: d.meta }));
+  const rqd = a.groundConditions?.rqd || [];
+
+  return `
+    <div class="section">
+      <div class="section-header"><h2>Progress</h2></div>
+      <div class="progress-grid">
+        <div class="progress-main">
+          ${progressMeter(c.completion_pct, { label: `${c.current_depth ?? 0} m of ${c.target_depth ?? '—'} m`, empty: 'Set a planned or total depth to track completion' })}
+          <div class="stat-row">
+            <div class="mini-stat"><span class="mini-label">Metres drilled</span><strong>${h.total_metres ?? 0} m</strong></div>
+            <div class="mini-stat"><span class="mini-label">Runs</span><strong>${h.total_runs ?? 0}</strong></div>
+            <div class="mini-stat"><span class="mini-label">Avg / day</span><strong>${h.avg_metres_per_day ?? '—'} m</strong></div>
+            <div class="mini-stat"><span class="mini-label">Core recovery</span><strong>${h.core_recovery_pct ?? '—'}%</strong></div>
+            <div class="mini-stat"><span class="mini-label">Downtime</span><strong>${h.total_downtime_hours ?? 0} h</strong></div>
+            <div class="mini-stat"><span class="mini-label">Est. completion</span><strong>${c.estimated_completion || '—'}</strong></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <h3>Daily production</h3>
+          ${columnChart(dailyPoints, {
+            unit: ' m',
+            yLabel: 'Metres drilled',
+            xLabel: 'Date',
+            overlay: { key: 'cumulative', label: 'Cumulative', color: '#eb6834' },
+            empty: 'No dated drilling runs yet.',
+            ariaLabel: 'Metres drilled per day with cumulative total',
+          })}
+        </div>
+        <div class="chart-card">
+          <h3>Sample &amp; test distribution by depth</h3>
+          ${depthProfileChart(a.depthDistribution, { empty: 'No samples or tests recorded yet.' })}
+        </div>
+        ${
+          rqd.length
+            ? `<div class="chart-card"><h3>RQD with depth</h3>
+                ${lineChart([{ label: 'RQD', points: rqd.map((p) => ({ x: p.x, y: p.y })) }], {
+                  unit: '%',
+                  xLabel: 'Depth (m)',
+                  xFormat: (v) => `${v} m`,
+                  ariaLabel: 'Rock quality designation against depth',
+                })}</div>`
+            : ''
+        }
+      </div>
+    </div>
+  `;
+}
+
 async function renderBoreholeDetail(id) {
   const borehole = await api('GET', `/api/boreholes/${id}`);
   const project = await api('GET', `/api/projects/${borehole.project_id}`);
   const logs = await api('GET', `/api/boreholes/${id}/logs`);
   const samples = await api('GET', `/api/boreholes/${id}/samples`);
   const tests = await api('GET', `/api/boreholes/${id}/tests`);
+  const runs = await api('GET', `/api/boreholes/${id}/runs`);
+  const bhAnalytics = await api('GET', `/api/analytics?borehole_id=${id}`);
 
   setBreadcrumb([
     { label: 'Projects', href: '#/projects' },
@@ -1925,6 +2203,44 @@ async function renderBoreholeDetail(id) {
       <div class="item"><span class="label">Elevation</span>${fmt(borehole.elevation, ' m')}</div>
       <div class="item"><span class="label">Start &rarr; End</span>${fmt(borehole.start_date)} &rarr; ${fmt(borehole.end_date)}</div>
       <div class="item"><span class="label">Notes</span>${fmt(borehole.notes)}</div>
+    </div>
+
+    ${boreholeProgressHtml(bhAnalytics, borehole)}
+
+    <div class="section">
+      <div class="section-header">
+        <h2>Drilling Runs</h2>
+        ${canWrite() ? `<button class="primary" id="new-run-btn">+ Log Drilling Run</button>` : ''}
+      </div>
+      ${
+        runs.length === 0
+          ? `<div class="empty-state">No drilling runs logged yet. Log a run before capturing samples or tests &mdash; every sample links to the run it was taken from.</div>`
+          : `<table>
+              <thead><tr><th>Run</th><th>Depth From</th><th>Depth To</th><th>Date</th><th>Shift</th><th>Method</th><th>Rig</th><th>Operator</th><th>Core Rec.</th><th>RQD</th><th>Downtime</th>${canWrite() ? '<th></th>' : ''}</tr></thead>
+              <tbody>
+                ${runs
+                  .map((r) => {
+                    const interval = (r.depth_to ?? 0) - (r.depth_from ?? 0);
+                    const recPct = r.core_recovered_m !== null && interval > 0 ? (r.core_recovered_m / interval) * 100 : null;
+                    return `<tr>
+                      <td><strong>${fmt(r.run_number)}</strong></td>
+                      <td class="depth-cell">${r.depth_from} m</td>
+                      <td class="depth-cell">${r.depth_to} m</td>
+                      <td>${fmt(r.date)}</td>
+                      <td>${fmt(r.shift)}</td>
+                      <td>${fmt(r.drilling_method)}</td>
+                      <td>${fmt(r.rig_name)}</td>
+                      <td>${fmt(r.operator_name)}</td>
+                      <td>${recPct === null ? '&mdash;' : `${recPct.toFixed(0)}%`}</td>
+                      <td>${fmt(r.rqd_pct, '%')}</td>
+                      <td>${r.downtime_min ? `${r.downtime_min} min` : '&mdash;'}</td>
+                      ${canWrite() ? `<td class="actions-cell"><button class="link" data-edit-run="${r.id}">Edit</button><button class="link" data-delete-run="${r.id}">Delete</button></td>` : ''}
+                    </tr>`;
+                  })
+                  .join('')}
+              </tbody>
+            </table>`
+      }
     </div>
 
     <div class="section">
@@ -2064,6 +2380,9 @@ async function renderBoreholeDetail(id) {
         <div><label>Northing</label><input type="number" step="any" name="northing" value="${fmt(borehole.northing).replace('&mdash;','')}" /></div>
         <div><label>Elevation (m)</label><input type="number" step="any" name="elevation" value="${fmt(borehole.elevation).replace('&mdash;','')}" /></div>
         <div><label>Total Depth (m)</label><input type="number" step="any" name="total_depth" value="${fmt(borehole.total_depth).replace('&mdash;','')}" /></div>
+        <div><label>Planned Depth (m)</label><input type="number" step="any" name="planned_depth" value="${fmt(borehole.planned_depth).replace('&mdash;','')}" /></div>
+        <div><label>Planned Start</label><input type="date" name="planned_start_date" value="${fmt(borehole.planned_start_date).replace('&mdash;','')}" /></div>
+        <div><label>Planned End</label><input type="date" name="planned_end_date" value="${fmt(borehole.planned_end_date).replace('&mdash;','')}" /></div>
         <div><label>Drilling Method</label><input name="drill_method" value="${esc(borehole.drill_method || '')}" /></div>
         <div><label>Start Date</label><input type="date" name="start_date" value="${esc(borehole.start_date || '')}" /></div>
         <div><label>End Date</label><input type="date" name="end_date" value="${esc(borehole.end_date || '')}" /></div>
@@ -2092,6 +2411,27 @@ async function renderBoreholeDetail(id) {
     location.hash = `#/projects/${project.id}`;
   });
 
+  const newRunBtn = document.getElementById('new-run-btn');
+  if (newRunBtn) {
+    newRunBtn.addEventListener('click', () => openRunModal(id, null, () => renderBoreholeDetail(id)));
+  }
+
+  appEl.querySelectorAll('[data-edit-run]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const run = runs.find((r) => String(r.id) === btn.dataset.editRun);
+      openRunModal(id, run, () => renderBoreholeDetail(id));
+    });
+  });
+
+  appEl.querySelectorAll('[data-delete-run]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this drilling run? Samples and tests in this interval will be unlinked.')) return;
+      await api('DELETE', `/api/runs/${btn.dataset.deleteRun}`);
+      toast('Drilling run deleted');
+      renderBoreholeDetail(id);
+    });
+  });
+
   document.getElementById('new-log-btn').addEventListener('click', () => {
     const lastEnd = lastEndDepth(logs);
     const form = openModal({
@@ -2100,32 +2440,54 @@ async function renderBoreholeDetail(id) {
       fieldsHtml: `
         ${depthFieldsHtml(lastEnd)}
         <div class="full"><label>Description</label><input name="description" placeholder="e.g. Firm brown clay, some gravel" /></div>
-        <div><label>USCS Classification</label><input name="uscs_class" placeholder="e.g. CL, SM, GP" /></div>
+        ${lookupSelectHtml('uscs_class', 'uscs_class', '', { label: 'USCS Classification' })}
+        ${lookupSelectHtml('soil_type', 'soil_type', '', { label: 'Soil Type' })}
+        ${lookupSelectHtml('soil_colour', 'soil_colour', '', { label: 'Soil Colour' })}
+        ${lookupSelectHtml('consistency', 'consistency', '', { label: 'Consistency' })}
+        ${lookupSelectHtml('density', 'density', '', { label: 'Density' })}
+        ${lookupSelectHtml('moisture', 'moisture', '', { label: 'Moisture' })}
+        ${lookupSelectHtml('weathering', 'weathering', '', { label: 'Weathering Grade' })}
+        ${lookupSelectHtml('rock_strength', 'rock_strength', '', { label: 'Rock Strength' })}
+        ${lookupSelectHtml('rock_type', 'rock_type', '', { label: 'Rock Type / Lithology' })}
+        ${lookupSelectHtml('fracture_condition', 'fracture_condition', '', { label: 'Fracture Condition' })}
         <div class="full"><label>Notes</label><textarea name="notes"></textarea></div>
       `,
       onSubmit: async (data) => {
-        await api('POST', `/api/boreholes/${id}/logs`, data);
+        // Descriptive vocabulary fields ride along in notes-style columns the
+        // log table already has; only the columns that exist are sent.
+        const payload = {
+          depth_from: data.depth_from, depth_to: data.depth_to, skip_reason: data.skip_reason,
+          description: [data.consistency, data.moisture, data.soil_colour, data.soil_type, data.weathering, data.rock_type, data.rock_strength, data.fracture_condition, data.description]
+            .filter(Boolean).join(', ') || null,
+          uscs_class: data.uscs_class,
+          notes: data.notes,
+        };
+        await api('POST', `/api/boreholes/${id}/logs`, payload);
+        await submitCustomLookups(form);
         toast('Log entry added');
         renderBoreholeDetail(id);
       },
     });
     wireDepthContinuity(form, lastEnd);
+    wireLookups(form);
   });
 
-  document.getElementById('new-sample-btn').addEventListener('click', () => {
-    const lastEnd = lastEndDepth(samples);
+  document.getElementById('new-sample-btn').addEventListener('click', async () => {
+    const ctx = await api('GET', `/api/boreholes/${id}/next-interval?kind=sample`);
+    const lastEnd = ctx.suggested_from;
     const form = openModal({
       title: 'Add Sample',
       submitLabel: 'Add Sample',
-      fieldsHtml: sampleModalFieldsHtml(lastEnd),
+      fieldsHtml: sampleModalFieldsHtml(lastEnd, { operator_name: ctx.defaults.operator_name, date: ctx.defaults.date }),
       onSubmit: async (data) => {
         data.sample_data = data.sample_data ? JSON.parse(data.sample_data) : null;
         await api('POST', `/api/boreholes/${id}/samples`, data);
+        await submitCustomLookups(form);
         toast('Sample added');
         renderBoreholeDetail(id);
       },
     });
-    wireSampleModal(form, lastEnd);
+    wireSampleModal(form, lastEnd, ctx);
   });
 
   appEl.querySelectorAll('[data-delete-log]').forEach((btn) => {

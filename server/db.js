@@ -140,7 +140,69 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- A drilling run is one advance of the drill string: the atomic unit of
+  -- production. Samples and in-situ tests are taken *within* a run, so the run
+  -- is what ties depth, date, shift, rig, method and operator together — and
+  -- what every progress/production analytic is computed from.
+  CREATE TABLE IF NOT EXISTS drilling_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    borehole_id INTEGER NOT NULL REFERENCES boreholes(id) ON DELETE CASCADE,
+    run_number INTEGER,
+    depth_from REAL NOT NULL,
+    depth_to REAL NOT NULL,
+    date TEXT,
+    shift TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    drilling_method TEXT,
+    rig_name TEXT,
+    operator_name TEXT,
+    helper_name TEXT,
+    bit_type TEXT,
+    core_barrel_type TEXT,
+    core_recovered_m REAL,
+    rqd_pct REAL,
+    penetration_rate_m_hr REAL,
+    drilling_time_min REAL,
+    downtime_min REAL,
+    downtime_reason TEXT,
+    water_loss_pct REAL,
+    groundwater_obs TEXT,
+    ground_conditions TEXT,
+    refusal_reason TEXT,
+    drilling_status TEXT,
+    remarks TEXT,
+    skip_reason TEXT,
+    supervisor_name TEXT,
+    approved_at TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Controlled vocabularies for the geotechnical fields operators would
+  -- otherwise retype. Seeded values ship Approved; an operator's "Other"
+  -- entry lands as Pending and only joins the standard list once a
+  -- supervisor/admin approves it, so the vocabulary stays clean.
+  CREATE TABLE IF NOT EXISTS lookup_options (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    value TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Approved' CHECK (status IN ('Approved', 'Pending', 'Rejected')),
+    is_seed INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TEXT,
+    review_note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (category, value)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_boreholes_project ON boreholes(project_id);
+  CREATE INDEX IF NOT EXISTS idx_runs_borehole ON drilling_runs(borehole_id);
+  CREATE INDEX IF NOT EXISTS idx_runs_date ON drilling_runs(date);
+  CREATE INDEX IF NOT EXISTS idx_lookup_category ON lookup_options(category, status);
   CREATE INDEX IF NOT EXISTS idx_logs_borehole ON log_entries(borehole_id);
   CREATE INDEX IF NOT EXISTS idx_samples_borehole ON samples(borehole_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -212,5 +274,22 @@ db.exec(`UPDATE samples SET depth_from = depth, depth_to = depth WHERE depth_fro
 addColumnIfMissing('tests', 'test_ref', 'TEXT');
 addColumnIfMissing('tests', 'supervisor_name', 'TEXT');
 addColumnIfMissing('tests', 'approved_at', 'TEXT');
+
+// Samples and tests are captured within a drilling run. run_id is resolved
+// from the record's depth interval on write, so operators never pick it by
+// hand and the link stays correct if depths are edited.
+addColumnIfMissing('samples', 'run_id', 'INTEGER REFERENCES drilling_runs(id) ON DELETE SET NULL');
+addColumnIfMissing('tests', 'run_id', 'INTEGER REFERENCES drilling_runs(id) ON DELETE SET NULL');
+
+// Planned targets, so progress analytics can compare planned vs actual
+// rather than only reporting what already happened.
+addColumnIfMissing('boreholes', 'planned_depth', 'REAL');
+addColumnIfMissing('boreholes', 'planned_start_date', 'TEXT');
+addColumnIfMissing('boreholes', 'planned_end_date', 'TEXT');
+
+db.exec(`CREATE INDEX IF NOT EXISTS idx_samples_run ON samples(run_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_tests_run ON tests(run_id)`);
+
+require('./lookups').seed(db);
 
 module.exports = db;
