@@ -127,6 +127,9 @@ async function renderAnalyticsPage() {
           pva.points.length
             ? lineChart(
                 [
+                  // Planned is a target reference line, not a data series, so it
+                  // wears the muted ink token rather than a categorical hue and
+                  // carries a dash pattern as secondary encoding.
                   { label: 'Planned', points: pva.points.map((p) => ({ x: p.x, y: p.planned })), dashed: true, color: '#898781' },
                   { label: 'Actual', points: pva.points.map((p) => ({ x: p.x, y: p.actual })), color: '#2a78d6', area: true },
                 ],
