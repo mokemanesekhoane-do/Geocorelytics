@@ -887,11 +887,24 @@ function formatBytes(bytes) {
 // ================================================================
 
 async function boot() {
-  const status = await fetch('/api/auth/status').then((r) => r.json());
-  if (status.needsSetup) return showSetupScreen();
-  if (!status.user) return showLoginScreen();
-  currentUser = status.user;
-  showApp();
+  try {
+    const res = await fetch('/api/auth/status');
+    if (!res.ok) throw new Error(`Server responded with ${res.status}`);
+    const status = await res.json();
+    if (status.needsSetup) return showSetupScreen();
+    if (!status.user) return showLoginScreen();
+    currentUser = status.user;
+    showApp();
+  } catch (err) {
+    showAuth(`
+      <div class="auth-card">
+        <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
+        <h2>Can't reach the server</h2>
+        <p class="auth-subtitle">GeoCorelytics couldn't connect to its backend. Make sure the server is running (<code>npm start</code>), then reload this page.</p>
+        <button type="button" class="primary" style="width:100%;padding:11px;" onclick="location.reload()">Retry</button>
+      </div>
+    `);
+  }
 }
 
 function showAuth(html) {

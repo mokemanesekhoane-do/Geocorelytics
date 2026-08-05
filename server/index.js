@@ -20,7 +20,9 @@ const {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const uploadsDir = path.join(__dirname, '..', 'uploads');
+// Lives under data/ so a single persistent volume mount (data/) covers both
+// the SQLite database and uploaded files on hosts with ephemeral filesystems.
+const uploadsDir = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 const upload = multer({
