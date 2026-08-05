@@ -76,32 +76,6 @@ section { position: relative; }
   transform: translateY(-2px);
 }
 
-/* Secondary CTA sitting beside the primary — a clear outline so Sign In and
-   Sign Up read as a matched pair rather than one button and one link. */
-.lp-btn-outline {
-  background: transparent;
-  color: var(--white);
-  border-color: rgba(255, 255, 255, 0.5);
-}
-
-.lp-btn-outline:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: var(--white);
-  transform: translateY(-2px);
-}
-
-/* Nav-bar Sign In: quieter than the Sign Up button next to it. */
-.lp-btn-quiet {
-  background: transparent;
-  color: var(--white);
-  border-color: transparent;
-}
-
-.lp-btn-quiet:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--white);
-}
-
 .lp-btn-lg { padding: 14px 28px; font-size: 0.98rem; }
 
 /* ---------- Nav ---------- */
@@ -240,20 +214,7 @@ section { position: relative; }
   padding: 0 24px;
 }
 
-.lp-mobile-menu.lp-open { max-height: 520px; padding: 14px 24px 22px; }
-
-.lp-mobile-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.lp-mobile-actions .lp-btn {
-  flex: 1;
-  justify-content: center;
-  border-bottom: none;
-  margin-top: 0;
-}
+.lp-mobile-menu.lp-open { max-height: 460px; padding: 14px 24px 22px; }
 
 .lp-mobile-menu a {
   display: flex;
@@ -372,14 +333,6 @@ section { position: relative; }
   gap: 14px;
   flex-wrap: wrap;
   margin-bottom: 30px;
-}
-
-.lp-cta-actions {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  justify-content: center;
-  margin-bottom: 14px;
 }
 
 .lp-trust-row {
@@ -729,10 +682,8 @@ section { position: relative; }
   .lp-cta-band { padding: 64px 18px; }
   .lp-grid { grid-template-columns: 1fr; }
   .lp-trust-grid { grid-template-columns: 1fr; }
-  .lp-hero-ctas,
-  .lp-cta-actions { flex-direction: column; align-items: stretch; }
-  .lp-hero-ctas .lp-btn,
-  .lp-cta-actions .lp-btn { justify-content: center; }
+  .lp-hero-ctas { flex-direction: column; align-items: stretch; }
+  .lp-hero-ctas .lp-btn { justify-content: center; }
   .lp-trust-row { gap: 16px 22px; }
   .lp-footer-inner { flex-direction: column; align-items: flex-start; }
   .lp-byline { font-size: 0.78rem; }

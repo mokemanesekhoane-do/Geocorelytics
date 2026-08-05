@@ -1143,10 +1143,7 @@ async function boot() {
     if (!res.ok) throw new Error(`Server responded with ${res.status}`);
     const status = await res.json();
     if (status.needsSetup) return showSetupScreen();
-    // The landing page's Sign Up button links to app.html?signup
-    if (!status.user) {
-      return location.search.includes('signup') ? showSignupScreen() : showLoginScreen();
-    }
+    if (!status.user) return showLoginScreen();
     currentUser = status.user;
     await loadLookups();
     showApp();
@@ -1188,13 +1185,9 @@ function showLoginScreen(errorMsg) {
         <div><label>Password</label><input type="password" name="password" required /></div>
         <button type="submit" class="primary">Sign In</button>
       </form>
-      <p class="auth-alt">Don't have an account? <a href="#" id="to-signup">Create one</a></p>
+      <p class="auth-alt">Need an account? Contact your GeoCorelytics administrator.</p>
     </div>
   `);
-  document.getElementById('to-signup').addEventListener('click', (e) => {
-    e.preventDefault();
-    showSignupScreen();
-  });
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.target).entries());
@@ -1205,44 +1198,6 @@ function showLoginScreen(errorMsg) {
       showApp();
     } catch (err) {
       showLoginScreen(err.message);
-    }
-  });
-}
-
-function showSignupScreen(errorMsg) {
-  showAuth(`
-    <div class="auth-card">
-      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
-      <h2>Create your account</h2>
-      <p class="auth-subtitle">Request access to GeoCorelytics</p>
-      ${errorMsg ? `<div class="auth-error">${esc(errorMsg)}</div>` : ''}
-      <form id="signup-form">
-        <div><label>Full Name</label><input name="name" required autofocus /></div>
-        <div><label>Work Email</label><input type="email" name="email" required /></div>
-        <div><label>Password (min 8 characters)</label><input type="password" name="password" minlength="8" required /></div>
-        <div><label>Confirm Password</label><input type="password" name="confirm" minlength="8" required /></div>
-        <button type="submit" class="primary">Create Account</button>
-      </form>
-      <p class="auth-note">New accounts start with no project access. An administrator assigns your projects and role before you can see any data.</p>
-      <p class="auth-alt">Already have an account? <a href="#" id="to-signin">Sign in</a></p>
-    </div>
-  `);
-  document.getElementById('to-signin').addEventListener('click', (e) => {
-    e.preventDefault();
-    showLoginScreen();
-  });
-  document.getElementById('signup-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const data = Object.fromEntries(new FormData(e.target).entries());
-    if (data.password !== data.confirm) return showSignupScreen('Passwords do not match');
-    delete data.confirm;
-    try {
-      const user = await api('POST', '/api/auth/register', data);
-      currentUser = user;
-      await loadLookups();
-      showApp();
-    } catch (err) {
-      showSignupScreen(err.message);
     }
   });
 }

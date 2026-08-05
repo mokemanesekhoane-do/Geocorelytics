@@ -1,0 +1,60 @@
+# Deploy to Railway on every push to main.
+#
+# Why this exists: Railway's native git auto-deploy needs its GitHub App
+# installed on the repo, which requires authorising Railway against this
+# GitHub account. This workflow deploys with a project token instead, so
+# pushes ship without that connection.
+#
+# One-time setup:
+#   1. Railway dashboard -> Geocorelytics project -> Settings -> Tokens
+#      -> create a token scoped to the "production" environment.
+#   2. GitHub repo -> Settings -> Secrets and variables -> Actions
+#      -> New repository secret, named RAILWAY_TOKEN, pasted value.
+#
+# Until that secret exists the workflow skips itself rather than failing,
+# so a missing token never shows up as a red X on the commit.
+
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # allows a manual re-deploy from the Actions tab
+
+concurrency:
+  # A newer push supersedes an in-flight deploy rather than racing it.
+  group: railway-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for deploy token
+        id: guard
+        run: |
+          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
+            echo "RAILWAY_TOKEN secret is not set — skipping deploy."
+            echo "See the setup steps in .github/workflows/deploy.yml."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          node-version: '22'
+
+      - name: Install Railway CLI
+        if: steps.guard.outputs.ready == 'true'
+        run: npm install -g @railway/cli
+
+      - name: Deploy
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --ci --service Geocorelytics --message "${{ github.event.head_commit.message || 'manual deploy' }}"

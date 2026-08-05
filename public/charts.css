@@ -397,31 +397,13 @@
   color: var(--text-dim);
 }
 
-/* ---------- Auth: sign-in / sign-up cross-links ---------- */
+/* ---------- Auth ---------- */
 
 .auth-card .auth-alt {
   text-align: center;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
   color: var(--text-dim);
   margin: 16px 0 0;
-}
-
-.auth-card .auth-alt a {
-  color: var(--green);
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.auth-card .auth-alt a:hover { text-decoration: underline; }
-
-.auth-card .auth-note {
-  margin: 14px 0 0;
-  padding: 10px 12px;
-  background: var(--shell-bg);
-  border-radius: var(--radius-sm);
-  font-size: 0.76rem;
-  line-height: 1.5;
-  color: var(--text-dim);
 }
 
 /* ---------- Vocabulary admin ---------- */
