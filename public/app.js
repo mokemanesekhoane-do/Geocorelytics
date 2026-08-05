@@ -369,19 +369,28 @@ const TEST_TYPES = {
     resultLabel: 'Coefficient of Permeability (k)',
     formulaNote: 'Hvorslev method for an uncased test section (valid for intake length / borehole radius > 8). Only test section from/to depth, diameters, and h/t readings drive the calculation — everything else is contextual record-keeping.',
     fields: [
-      { name: 'borehole_diameter_mm', label: 'Borehole / Standpipe Diameter (mm)', type: 'number', placeholder: 'e.g. 100' },
-      { name: 'casing_diameter_mm', label: 'Casing Diameter (mm)', type: 'number', placeholder: 'e.g. 50' },
+      // Geometry — measured, so free numeric entry; standpipe type is standard.
+      { name: 'standpipe_type', label: 'Standpipe / Casing Type', lookup: 'standpipe_type' },
+      { name: 'borehole_diameter_mm', label: 'Borehole Diameter (mm)', type: 'number', placeholder: 'e.g. 100' },
+      { name: 'casing_diameter_mm', label: 'Standpipe / Casing Diameter (mm)', type: 'number', placeholder: 'e.g. 50' },
+      // Water levels and heads
       { name: 'initial_water_level_m', label: 'Initial Water Level (m bgl)', type: 'number' },
-      { name: 'static_water_level_m', label: 'Static Water Level (m bgl)', type: 'number' },
-      { name: 'h1_m', label: 'Initial Hydraulic Head h₁ (m)', type: 'number' },
+      { name: 'final_water_level_m', label: 'Final Water Level (m bgl)', type: 'number' },
+      { name: 'groundwater_level_m', label: 'Groundwater / Static Level (m bgl)', type: 'number' },
+      { name: 'h1_m', label: 'Initial Head h₁ (m)', type: 'number' },
+      { name: 'h2_m', label: 'Final Head h₂ (m)', type: 'number' },
+      // Timing
       { name: 't1_min', label: 'Time t₁ (min)', type: 'number', placeholder: '0' },
-      { name: 'h2_m', label: 'Final Hydraulic Head h₂ (m)', type: 'number' },
       { name: 't2_min', label: 'Time t₂ (min)', type: 'number' },
       { name: 'test_start_time', label: 'Test Start Time', type: 'time' },
       { name: 'test_end_time', label: 'Test End Time', type: 'time' },
+      // Conditions
       { name: 'water_temperature_c', label: 'Water Temperature (°C)', type: 'number' },
       { name: 'correction_factor', label: 'Correction Factor (optional, multiplies k)', type: 'number', placeholder: '1.0' },
-      { name: 'formation_description', label: 'Soil / Formation Description', type: 'text', full: true },
+      { name: 'test_condition', label: 'Test Condition / Validity', lookup: 'test_condition' },
+      { name: 'groundwater_obs', label: 'Groundwater Observation', lookup: 'groundwater_obs' },
+      { name: 'formation_description', label: 'Soil / Formation Description', lookup: 'soil_type', full: true },
+      { name: 'remarks_standard', label: 'Remarks', lookup: 'standard_remarks', full: true },
     ],
     compute(v) {
       const r = num(v.casing_diameter_mm) / 2000;
@@ -454,18 +463,25 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Standard equipment/condition fields become searchable dropdowns over the
+// controlled vocabulary; measured quantities stay free numeric entry, because
+// there is no standard list for a reading the operator takes off an instrument.
+function testFieldInputHtml(f, value) {
+  if (f.lookup) return lookupSelectHtml(f.lookup, `tf_${f.name}`, value, { label: f.label, full: f.full });
+  const wrap = f.full ? 'full' : '';
+  if (f.type === 'textarea') {
+    return `<div class="${wrap}"><label>${esc(f.label)}</label><textarea name="tf_${f.name}" placeholder="${esc(f.placeholder || '')}">${esc(value ?? '')}</textarea></div>`;
+  }
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="tf_${f.name}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" /></div>`;
+}
+
 function testTypeFieldsHtml(testType, existingData) {
   const config = TEST_TYPES[testType];
   existingData = existingData || {};
   if (!config) return '';
   return (
     `<div class="full" style="font-size:0.78rem;color:var(--text-dim);margin:2px 0 4px;">${esc(config.formulaNote)}</div>` +
-    config.fields
-      .map(
-        (f) =>
-          `<div class="${f.full ? 'full' : ''}"><label>${esc(f.label)}</label><input type="${f.type}" ${f.type === 'number' ? 'step="any"' : ''} name="tf_${f.name}" placeholder="${esc(f.placeholder || '')}" value="${esc(existingData[f.name] ?? '')}" /></div>`
-      )
-      .join('')
+    config.fields.map((f) => testFieldInputHtml(f, existingData[f.name])).join('')
   );
 }
 
@@ -504,8 +520,13 @@ function wireTestTypeCalc(form, testType) {
 
   config.fields.forEach((f) => {
     const input = form.querySelector(`[name="tf_${f.name}"]`);
-    if (input) input.addEventListener('input', recalc);
+    if (!input) return;
+    input.addEventListener('input', recalc);
+    // Lookup fields write to a hidden input and signal via `change`, not
+    // `input` — without this a picked dropdown value never reaches test_data.
+    input.addEventListener('change', recalc);
   });
+  form.addEventListener('lookup-change', recalc);
   if (depthFromInput) depthFromInput.addEventListener('input', recalc);
   if (depthToInput) depthToInput.addEventListener('input', recalc);
   recalc();
@@ -525,6 +546,7 @@ function testModalFieldsHtml(lastEnd, existing) {
     </div>
     <div><label>Borehole / Test-Hole Reference</label><input name="test_ref" value="${esc(existing.test_ref || '')}" /></div>
     ${depthFieldsHtml(lastEnd, existing)}
+    <div class="full" id="interval-validation"></div>
     <div><label>Date</label><input type="date" name="date" value="${esc(existing.date || todayStr())}" /></div>
     <div><label>Operator Name</label><input name="conducted_by" value="${esc(existing.conducted_by || '')}" /></div>
     <div class="full" id="test-type-fields-wrap">
@@ -542,16 +564,19 @@ function testModalFieldsHtml(lastEnd, existing) {
   `;
 }
 
-function wireTestModal(form, lastEnd) {
+function wireTestModal(form, lastEnd, context) {
   wireDepthContinuity(form, lastEnd);
+  wireLookups(form);
   const typeSelect = form.querySelector('#test-type-select');
   const fieldsContainer = form.querySelector('#test-type-fields');
   function rebuild() {
     fieldsContainer.innerHTML = testTypeFieldsHtml(typeSelect.value, {});
+    wireLookups(form);
     wireTestTypeCalc(form, typeSelect.value);
   }
   typeSelect.addEventListener('change', rebuild);
   wireTestTypeCalc(form, typeSelect.value);
+  if (context) wireIntervalValidation(form, context);
 }
 
 // ================================================================
@@ -571,35 +596,45 @@ const SAMPLE_TYPES = {
     resultLabel: 'N-Value',
     formulaNote: 'N = blows for 2nd 150 mm + blows for 3rd 150 mm (seating and 1st increment excluded, per ASTM D1586)',
     fields: [
-      { name: 'hammer_type', label: 'Hammer Type', type: 'select', options: ['Automatic', 'Safety (Trip)', 'Donut'] },
+      // Equipment — standard catalogues, so dropdowns.
+      { name: 'sampler_type', label: 'Sampler Type', lookup: 'sampler_type' },
+      { name: 'hammer_type', label: 'Hammer Type', lookup: 'hammer_type' },
+      // Measured equipment dimensions stay numeric.
       { name: 'hammer_weight_kg', label: 'Hammer Weight (kg)', type: 'number', placeholder: '63.5' },
       { name: 'drop_height_mm', label: 'Drop Height (mm)', type: 'number', placeholder: '760' },
       { name: 'rod_length_m', label: 'Rod Length (m)', type: 'number' },
-      { name: 'sampler_type', label: 'Sampler Type', type: 'text', placeholder: 'Split Spoon' },
       { name: 'sampler_diameter_mm', label: 'Sampler Diameter (mm)', type: 'number' },
-      { name: 'seating_blows', label: 'Seating Blows', type: 'number' },
+      // Blow counts — the N-value inputs.
+      { name: 'seating_blows', label: 'Seating Blows (0–150 mm)', type: 'number' },
       { name: 'blows_150_1', label: 'Blows — 1st 150 mm', type: 'number' },
       { name: 'blows_150_2', label: 'Blows — 2nd 150 mm', type: 'number' },
       { name: 'blows_150_3', label: 'Blows — 3rd 150 mm', type: 'number' },
-      { name: 'total_penetration_mm', label: 'Total Penetration Achieved (mm)', type: 'number', placeholder: '450' },
-      { name: 'refusal_status', label: 'Refusal', type: 'select', options: ['No', 'Yes'] },
-      { name: 'refusal_criteria', label: 'Refusal Criteria', type: 'text', full: true, placeholder: 'e.g. >50 blows for 150 mm' },
+      { name: 'penetration_length_mm', label: 'Penetration Length (mm)', type: 'number', placeholder: '450' },
       { name: 'recovery_length_mm', label: 'Sample Recovery Length (mm)', type: 'number' },
+      // Outcome and condition — standard terms.
+      { name: 'refusal_status', label: 'Refusal Status', lookup: 'refusal_status' },
+      { name: 'sample_condition', label: 'Sample Condition', lookup: 'sample_condition' },
+      { name: 'moisture_condition', label: 'Moisture Condition', lookup: 'moisture' },
+      { name: 'soil_classification', label: 'Soil Classification (USCS)', lookup: 'uscs_class' },
+      { name: 'remarks_standard', label: 'Remarks', lookup: 'standard_remarks', full: true },
       { name: 'disturbance_obstruction', label: 'Disturbance / Obstruction Encountered', type: 'textarea', full: true },
     ],
     compute(v) {
       const b2 = v.blows_150_2 === '' || v.blows_150_2 === undefined ? null : num(v.blows_150_2);
       const b3 = v.blows_150_3 === '' || v.blows_150_3 === undefined ? null : num(v.blows_150_3);
+      // N is the 2nd + 3rd increments; the seating drive and 1st increment are
+      // excluded per ASTM D1586.
       const nValue = b2 !== null && b3 !== null ? b2 + b3 : null;
-      const totalPen = num(v.total_penetration_mm);
+      const totalPen = num(v.penetration_length_mm);
       const recoveryLen = num(v.recovery_length_mm);
       const recoveryPct = totalPen > 0 && v.recovery_length_mm !== '' ? (recoveryLen / totalPen) * 100 : null;
       const warnings = [];
-      const isRefusal = v.refusal_status === 'Yes';
+      const isRefusal = !!v.refusal_status && v.refusal_status !== 'No Refusal';
       [num(v.blows_150_1), b2 ?? 0, b3 ?? 0].forEach((b, i) => {
-        if (b >= 50 && !isRefusal) warnings.push(`Blow count ≥50 in increment ${i + 1} — consider marking as Refusal`);
+        if (b >= 50 && !isRefusal) warnings.push(`Blow count ≥50 in increment ${i + 1} — consider recording a refusal status`);
       });
-      if (!isRefusal && totalPen > 0 && totalPen < 450) warnings.push('Incomplete penetration (<450 mm) — verify or mark as Refusal');
+      if (!isRefusal && totalPen > 0 && totalPen < 450) warnings.push('Incomplete penetration (<450 mm) — verify or record a refusal status');
+      if (recoveryPct !== null && recoveryPct > 100) warnings.push('Recovery exceeds penetration length — check the readings');
       return { nValue, recoveryPct, warnings, resultText: nValue !== null ? `N = ${nValue}` : null };
     },
   },
@@ -607,23 +642,28 @@ const SAMPLE_TYPES = {
     resultLabel: 'Recovery %',
     formulaNote: 'Recovery % = recovered length ÷ penetration length. Recovered length cannot exceed penetration or tube length.',
     fields: [
-      { name: 'tube_type', label: 'Tube Type', type: 'text' },
+      // Tube specification — type/condition come from standard catalogues;
+      // the dimensions are measured, so they stay numeric.
+      { name: 'tube_type', label: 'Tube Type', lookup: 'tube_type' },
       { name: 'tube_diameter_mm', label: 'Tube Diameter (mm)', type: 'number' },
       { name: 'tube_length_mm', label: 'Tube Length (mm)', type: 'number' },
       { name: 'wall_thickness_mm', label: 'Wall Thickness (mm)', type: 'number' },
-      { name: 'cutting_edge_condition', label: 'Cutting-Edge Condition', type: 'select', options: ['Good', 'Worn', 'Damaged'] },
-      { name: 'push_method', label: 'Push Method', type: 'select', options: ['Hydraulic', 'Manual / Static', 'Hammer'] },
+      { name: 'cutting_edge_condition', label: 'Cutting-Edge Condition', lookup: 'cutting_edge_condition' },
+      // Push
+      { name: 'push_method', label: 'Push Method', lookup: 'push_method' },
       { name: 'push_length_mm', label: 'Push Length (mm)', type: 'number' },
       { name: 'penetration_length_mm', label: 'Penetration Length (mm)', type: 'number' },
       { name: 'recovery_length_mm', label: 'Recovered Sample Length (mm)', type: 'number' },
       { name: 'applied_pressure_kpa', label: 'Applied Pressure / Thrust (kPa)', type: 'number' },
-      { name: 'sample_condition', label: 'Sample Condition', type: 'select', options: ['Good', 'Fair', 'Poor', 'Disturbed'] },
-      { name: 'degree_of_disturbance', label: 'Degree of Disturbance', type: 'select', options: ['Undisturbed', 'Slightly Disturbed', 'Disturbed'] },
-      { name: 'sample_orientation', label: 'Sample Orientation', type: 'text' },
-      { name: 'top_bottom_id', label: 'Top/Bottom Identification', type: 'select', options: ['Marked', 'Not Marked'] },
-      { name: 'sealing_method', label: 'Sealing Method', type: 'text' },
-      { name: 'preservation_method', label: 'Preservation Method', type: 'text' },
-      { name: 'storage_condition', label: 'Storage Condition', type: 'text' },
+      // Sample condition and orientation — standard terms.
+      { name: 'sample_condition', label: 'Sample Condition', lookup: 'sample_condition' },
+      { name: 'degree_of_disturbance', label: 'Degree of Disturbance', lookup: 'disturbance_degree' },
+      { name: 'sample_orientation', label: 'Sample Orientation', lookup: 'sample_orientation' },
+      { name: 'top_bottom_id', label: 'Top / Bottom Identification', lookup: 'top_bottom_id' },
+      // Handling
+      { name: 'sealing_method', label: 'Sealing Method', lookup: 'sealing_method' },
+      { name: 'preservation_method', label: 'Preservation Method', lookup: 'preservation_method' },
+      { name: 'storage_condition', label: 'Storage Condition', lookup: 'storage_condition' },
       { name: 'transport_details', label: 'Transport Details', type: 'textarea', full: true },
     ],
     compute(v) {
@@ -660,12 +700,15 @@ const SAMPLE_TYPES = {
         type: 'select',
         options: ['SQ1 - Excellent', 'SQ2 - Good', 'SQ3 - Fair', 'SQ4 - Poor', 'SQ5 - Very Poor'],
       },
+      { name: 'sample_condition', label: 'Sample Condition', lookup: 'sample_condition' },
+      { name: 'degree_of_disturbance', label: 'Degree of Disturbance', lookup: 'disturbance_degree' },
       { name: 'visible_defects', label: 'Visible Defects / Cracks / Contamination', type: 'textarea', full: true },
-      { name: 'sample_orientation', label: 'Sample Orientation', type: 'text' },
-      { name: 'top_bottom_id', label: 'Top/Bottom Identification', type: 'select', options: ['Marked', 'Not Marked'] },
-      { name: 'sealing_preservation', label: 'Sealing & Preservation Method', type: 'text' },
+      { name: 'sample_orientation', label: 'Sample Orientation', lookup: 'sample_orientation' },
+      { name: 'top_bottom_id', label: 'Top / Bottom Identification', lookup: 'top_bottom_id' },
+      { name: 'sealing_method', label: 'Sealing Method', lookup: 'sealing_method' },
+      { name: 'preservation_method', label: 'Preservation Method', lookup: 'preservation_method' },
       { name: 'required_lab_tests', label: 'Required Laboratory Tests', type: 'textarea', full: true },
-      { name: 'storage_requirements', label: 'Storage Requirements', type: 'text' },
+      { name: 'storage_requirements', label: 'Storage Requirements', lookup: 'storage_condition' },
       { name: 'dispatched_at', label: 'Date/Time Dispatched', type: 'datetime-local' },
       { name: 'receiving_lab', label: 'Receiving Laboratory', type: 'text' },
     ],
@@ -749,8 +792,14 @@ function wireSampleTypeCalc(form, sampleType) {
 
   config.fields.forEach((f) => {
     const input = form.querySelector(`[name="sf_${f.name}"]`);
-    if (input) input.addEventListener('input', recalc);
+    if (!input) return;
+    input.addEventListener('input', recalc);
+    // Lookup fields write to a hidden input, which never emits `input` — they
+    // signal via `change`, so without this a picked dropdown value would be
+    // left out of the serialised sample_data.
+    input.addEventListener('change', recalc);
   });
+  form.addEventListener('lookup-change', recalc);
   recalc();
 }
 
@@ -1094,7 +1143,10 @@ async function boot() {
     if (!res.ok) throw new Error(`Server responded with ${res.status}`);
     const status = await res.json();
     if (status.needsSetup) return showSetupScreen();
-    if (!status.user) return showLoginScreen();
+    // The landing page's Sign Up button links to app.html?signup
+    if (!status.user) {
+      return location.search.includes('signup') ? showSignupScreen() : showLoginScreen();
+    }
     currentUser = status.user;
     await loadLookups();
     showApp();
@@ -1136,8 +1188,13 @@ function showLoginScreen(errorMsg) {
         <div><label>Password</label><input type="password" name="password" required /></div>
         <button type="submit" class="primary">Sign In</button>
       </form>
+      <p class="auth-alt">Don't have an account? <a href="#" id="to-signup">Create one</a></p>
     </div>
   `);
+  document.getElementById('to-signup').addEventListener('click', (e) => {
+    e.preventDefault();
+    showSignupScreen();
+  });
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.target).entries());
@@ -1148,6 +1205,44 @@ function showLoginScreen(errorMsg) {
       showApp();
     } catch (err) {
       showLoginScreen(err.message);
+    }
+  });
+}
+
+function showSignupScreen(errorMsg) {
+  showAuth(`
+    <div class="auth-card">
+      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
+      <h2>Create your account</h2>
+      <p class="auth-subtitle">Request access to GeoCorelytics</p>
+      ${errorMsg ? `<div class="auth-error">${esc(errorMsg)}</div>` : ''}
+      <form id="signup-form">
+        <div><label>Full Name</label><input name="name" required autofocus /></div>
+        <div><label>Work Email</label><input type="email" name="email" required /></div>
+        <div><label>Password (min 8 characters)</label><input type="password" name="password" minlength="8" required /></div>
+        <div><label>Confirm Password</label><input type="password" name="confirm" minlength="8" required /></div>
+        <button type="submit" class="primary">Create Account</button>
+      </form>
+      <p class="auth-note">New accounts start with no project access. An administrator assigns your projects and role before you can see any data.</p>
+      <p class="auth-alt">Already have an account? <a href="#" id="to-signin">Sign in</a></p>
+    </div>
+  `);
+  document.getElementById('to-signin').addEventListener('click', (e) => {
+    e.preventDefault();
+    showLoginScreen();
+  });
+  document.getElementById('signup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target).entries());
+    if (data.password !== data.confirm) return showSignupScreen('Passwords do not match');
+    delete data.confirm;
+    try {
+      const user = await api('POST', '/api/auth/register', data);
+      currentUser = user;
+      await loadLookups();
+      showApp();
+    } catch (err) {
+      showSignupScreen(err.message);
     }
   });
 }
@@ -1458,6 +1553,11 @@ async function renderFieldDashboard() {
     <div class="section">
       <div class="section-header"><h2>Borehole Data</h2></div>
       <div class="fd-grid">
+        <button class="fd-card" id="fd-run-btn" disabled>
+          <div class="fd-card-icon">&#9881;</div>
+          <div class="fd-card-title">Drilling Run</div>
+          <div class="fd-card-sub">Log the advance &mdash; do this first</div>
+        </button>
         <button class="fd-card" id="fd-log-btn" disabled>
           <div class="fd-card-icon">&#128203;</div>
           <div class="fd-card-title">Stratigraphy Log</div>
@@ -1500,6 +1600,7 @@ async function renderFieldDashboard() {
 
   const projectSelect = document.getElementById('fd-project');
   const boreholeSelect = document.getElementById('fd-borehole');
+  const runBtn = document.getElementById('fd-run-btn');
   const logBtn = document.getElementById('fd-log-btn');
   const sampleBtn = document.getElementById('fd-sample-btn');
   const testBtn = document.getElementById('fd-test-btn');
@@ -1511,6 +1612,7 @@ async function renderFieldDashboard() {
     selectedBoreholeId = null;
     boreholeSelect.innerHTML = `<option value="">Loading&hellip;</option>`;
     boreholeSelect.disabled = true;
+    runBtn.disabled = true;
     logBtn.disabled = true;
     sampleBtn.disabled = true;
     testBtn.disabled = true;
@@ -1530,6 +1632,7 @@ async function renderFieldDashboard() {
 
   boreholeSelect.addEventListener('change', () => {
     selectedBoreholeId = boreholeSelect.value || null;
+    runBtn.disabled = !selectedBoreholeId;
     logBtn.disabled = !selectedBoreholeId;
     sampleBtn.disabled = !selectedBoreholeId;
     testBtn.disabled = !selectedBoreholeId;
@@ -1562,38 +1665,46 @@ async function renderFieldDashboard() {
     wireDepthContinuity(form, lastEnd);
   });
 
+  runBtn.addEventListener('click', async () => {
+    await openRunModal(selectedBoreholeId, null, (saved) => {
+      fdLogSession(`Drilling run ${saved.run_number} — ${saved.depth_from}–${saved.depth_to} m on ${boreholeLabel()}`);
+    });
+  });
+
   sampleBtn.addEventListener('click', async () => {
-    const existingSamples = await api('GET', `/api/boreholes/${selectedBoreholeId}/samples`);
-    const lastEnd = lastEndDepth(existingSamples);
+    const ctx = await api('GET', `/api/boreholes/${selectedBoreholeId}/next-interval?kind=sample`);
+    const lastEnd = ctx.suggested_from;
     const form = openModal({
       title: `Add Sample — ${boreholeLabel()}`,
       submitLabel: 'Add Sample',
-      fieldsHtml: sampleModalFieldsHtml(lastEnd),
+      fieldsHtml: sampleModalFieldsHtml(lastEnd, { operator_name: ctx.defaults.operator_name, date: ctx.defaults.date }),
       onSubmit: async (data) => {
         data.sample_data = data.sample_data ? JSON.parse(data.sample_data) : null;
         await api('POST', `/api/boreholes/${selectedBoreholeId}/samples`, data);
+        await submitCustomLookups(form);
         toast('Sample added');
         fdLogSession(`${data.sample_type} sample ${data.depth_from}–${data.depth_to} m on ${boreholeLabel()}`);
       },
     });
-    wireSampleModal(form, lastEnd);
+    wireSampleModal(form, lastEnd, ctx);
   });
 
   testBtn.addEventListener('click', async () => {
-    const existingTests = await api('GET', `/api/boreholes/${selectedBoreholeId}/tests`);
-    const lastEnd = lastEndDepth(existingTests);
+    const ctx = await api('GET', `/api/boreholes/${selectedBoreholeId}/next-interval?kind=test`);
+    const lastEnd = ctx.suggested_from;
     const form = openModal({
       title: `Add In-situ Test — ${boreholeLabel()}`,
       submitLabel: 'Add Test',
-      fieldsHtml: testModalFieldsHtml(lastEnd),
+      fieldsHtml: testModalFieldsHtml(lastEnd, { conducted_by: ctx.defaults.operator_name, date: ctx.defaults.date }),
       onSubmit: async (data) => {
         data.test_data = data.test_data ? JSON.parse(data.test_data) : null;
         await api('POST', `/api/boreholes/${selectedBoreholeId}/tests`, data);
+        await submitCustomLookups(form);
         toast('Test added');
         fdLogSession(`${data.test_type} on ${boreholeLabel()}`);
       },
     });
-    wireTestModal(form, lastEnd);
+    wireTestModal(form, lastEnd, ctx);
   });
 
   timesheetBtn.addEventListener('click', () => {
@@ -2541,6 +2652,7 @@ async function renderBoreholeDetail(id) {
         onSubmit: async (data) => {
           data.sample_data = data.sample_data ? JSON.parse(data.sample_data) : null;
           await api('PUT', `/api/samples/${sample.id}`, data);
+          await submitCustomLookups(form);
           toast('Sample updated');
           renderBoreholeDetail(id);
         },
@@ -2559,20 +2671,22 @@ async function renderBoreholeDetail(id) {
 
   const newTestBtn = document.getElementById('new-test-btn');
   if (newTestBtn) {
-    newTestBtn.addEventListener('click', () => {
-      const lastEnd = lastEndDepth(tests);
+    newTestBtn.addEventListener('click', async () => {
+      const ctx = await api('GET', `/api/boreholes/${id}/next-interval?kind=test`);
+      const lastEnd = ctx.suggested_from;
       const form = openModal({
         title: 'Add In-situ Test',
         submitLabel: 'Add Test',
-        fieldsHtml: testModalFieldsHtml(lastEnd),
+        fieldsHtml: testModalFieldsHtml(lastEnd, { conducted_by: ctx.defaults.operator_name, date: ctx.defaults.date }),
         onSubmit: async (data) => {
           data.test_data = data.test_data ? JSON.parse(data.test_data) : null;
           await api('POST', `/api/boreholes/${id}/tests`, data);
+          await submitCustomLookups(form);
           toast('Test added');
           renderBoreholeDetail(id);
         },
       });
-      wireTestModal(form, lastEnd);
+      wireTestModal(form, lastEnd, ctx);
     });
   }
 
@@ -2596,6 +2710,7 @@ async function renderBoreholeDetail(id) {
         onSubmit: async (data) => {
           data.test_data = data.test_data ? JSON.parse(data.test_data) : null;
           await api('PUT', `/api/tests/${test.id}`, data);
+          await submitCustomLookups(form);
           toast('Test updated');
           renderBoreholeDetail(id);
         },

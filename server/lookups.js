@@ -151,6 +151,102 @@ const CATEGORIES = {
     label: 'Shift',
     values: ['Day', 'Night'],
   },
+
+  // ---- Sampling equipment & handling (Shelby / UDS) ----
+  tube_type: {
+    label: 'Tube Type',
+    values: [
+      'Shelby Thin-Wall', 'Thin-Wall Open Drive', 'Stationary Piston', 'Hydraulic Piston (Osterberg)',
+      'Fixed Piston', 'Free Piston', 'Split Barrel', 'Mazier Triple-Tube', 'Denison', 'Pitcher',
+    ],
+  },
+  cutting_edge_condition: {
+    label: 'Cutting-Edge Condition',
+    values: ['Sharp / Good', 'Slightly Worn', 'Worn', 'Blunt', 'Damaged', 'Deformed / Bent'],
+  },
+  push_method: {
+    label: 'Push Method',
+    values: [
+      'Hydraulic Push - Continuous', 'Hydraulic Push - Staged', 'Mechanical Jack',
+      'Static / Manual Push', 'Hammer Driven', 'Piston Assisted',
+    ],
+  },
+  sample_condition: {
+    label: 'Sample Condition',
+    values: ['Intact / Excellent', 'Good', 'Fair', 'Poor', 'Disturbed', 'Damaged', 'Contaminated', 'No Recovery'],
+  },
+  disturbance_degree: {
+    label: 'Degree of Disturbance',
+    values: ['Undisturbed', 'Slightly Disturbed', 'Moderately Disturbed', 'Highly Disturbed', 'Completely Remoulded'],
+  },
+  sample_orientation: {
+    label: 'Sample Orientation',
+    values: ['Vertical', 'Inclined', 'Horizontal', 'Not Recorded'],
+  },
+  top_bottom_id: {
+    label: 'Top / Bottom Identification',
+    values: ['Marked - Both Ends', 'Marked - Top Only', 'Marked - Bottom Only', 'Not Marked'],
+  },
+  sealing_method: {
+    label: 'Sealing Method',
+    values: [
+      'Wax Seal (Both Ends)', 'Paraffin Wax', 'Microcrystalline Wax', 'End Caps',
+      'End Caps + Adhesive Tape', 'Cling Film + Wax', 'Rubber Caps', 'O-Ring Seal', 'Not Sealed',
+    ],
+  },
+  preservation_method: {
+    label: 'Preservation Method',
+    values: [
+      'Wax Coating', 'Plastic Wrap + Wax', 'Sealed in Tube', 'Core Box - Sealed', 'Vacuum Sealed',
+      'Refrigerated (4 °C)', 'Humidity Controlled', 'Ambient / None',
+    ],
+  },
+  storage_condition: {
+    label: 'Storage Condition',
+    values: [
+      'Upright - Climate Controlled', 'Upright - Ambient', 'Horizontal - Climate Controlled',
+      'Horizontal - Ambient', 'Refrigerated', 'Core Shed', 'On Site - Shaded',
+    ],
+  },
+
+  // ---- SPT ----
+  sampler_type: {
+    label: 'Sampler Type',
+    values: [
+      'Standard Split Spoon (51 mm OD)', 'Split Spoon with Liner', 'Split Spoon without Liner',
+      'Solid Cone (50 mm)', 'Modified California', 'Dames & Moore', 'Large Penetration Sampler',
+    ],
+  },
+  hammer_type: {
+    label: 'Hammer Type',
+    values: [
+      'Automatic Trip', 'Safety Hammer', 'Donut Hammer', 'Pin-Guided',
+      'Manual Rope & Cathead', 'Hydraulic Auto-Hammer',
+    ],
+  },
+  refusal_status: {
+    label: 'Refusal Status',
+    values: [
+      'No Refusal', 'Refusal - 50 blows per 150 mm', 'Refusal - 100 blows total',
+      'Partial Penetration', 'Hard Layer / Obstruction', 'Practical Refusal',
+    ],
+  },
+
+  // ---- In-situ testing ----
+  test_condition: {
+    label: 'Test Condition / Validity',
+    values: [
+      'Valid', 'Valid - Temperature Corrected', 'Questionable - Verify',
+      'Invalid - Leakage Suspected', 'Invalid - Insufficient Data', 'Invalid - Equipment Fault', 'Repeat Required',
+    ],
+  },
+  standpipe_type: {
+    label: 'Standpipe / Casing Type',
+    values: [
+      'Open Standpipe', 'Slotted PVC', 'Perforated Casing', 'Screened Section',
+      'Uncased Borehole', 'Temporary Casing',
+    ],
+  },
 };
 
 function seed(db) {

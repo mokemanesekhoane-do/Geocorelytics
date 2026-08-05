@@ -76,6 +76,32 @@ section { position: relative; }
   transform: translateY(-2px);
 }
 
+/* Secondary CTA sitting beside the primary — a clear outline so Sign In and
+   Sign Up read as a matched pair rather than one button and one link. */
+.lp-btn-outline {
+  background: transparent;
+  color: var(--white);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.lp-btn-outline:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--white);
+  transform: translateY(-2px);
+}
+
+/* Nav-bar Sign In: quieter than the Sign Up button next to it. */
+.lp-btn-quiet {
+  background: transparent;
+  color: var(--white);
+  border-color: transparent;
+}
+
+.lp-btn-quiet:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--white);
+}
+
 .lp-btn-lg { padding: 14px 28px; font-size: 0.98rem; }
 
 /* ---------- Nav ---------- */
@@ -214,7 +240,20 @@ section { position: relative; }
   padding: 0 24px;
 }
 
-.lp-mobile-menu.lp-open { max-height: 420px; padding: 14px 24px 22px; }
+.lp-mobile-menu.lp-open { max-height: 520px; padding: 14px 24px 22px; }
+
+.lp-mobile-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.lp-mobile-actions .lp-btn {
+  flex: 1;
+  justify-content: center;
+  border-bottom: none;
+  margin-top: 0;
+}
 
 .lp-mobile-menu a {
   display: flex;
@@ -259,11 +298,30 @@ section { position: relative; }
   min-height: 500px;
 }
 
-.lp-hero-logo {
-  height: 56px;
+/* The GeoCorelytics mark lives once, in the nav — it stays on screen while
+   scrolling, so repeating it in the hero only competed with the headline. */
+
+/* Mokay attribution: deliberately quiet. The logo is sized off the text
+   cap-height and keeps its aspect ratio (width:auto) so it can't distort. */
+.lp-byline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--slate-300);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+  transition: opacity 0.2s ease;
+}
+
+.lp-byline:hover { opacity: 1; }
+
+.lp-byline img {
+  height: 22px;
   width: auto;
-  margin-bottom: 26px;
-  filter: var(--logo-shadow);
+  display: block;
+  flex-shrink: 0;
 }
 
 .lp-hero-fade {
@@ -313,7 +371,15 @@ section { position: relative; }
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
-  margin-bottom: 40px;
+  margin-bottom: 30px;
+}
+
+.lp-cta-actions {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 14px;
 }
 
 .lp-trust-row {
@@ -637,9 +703,13 @@ section { position: relative; }
 
 /* ---------- Responsive ---------- */
 
+/* Tablet: hero stacks to one column, text leads and the stat card follows. */
 @media (max-width: 980px) {
-  .lp-hero-inner { grid-template-columns: 1fr; min-height: 0; }
-  .lp-hero-card { order: -1; max-width: 380px; margin: 0 auto 20px; }
+  .lp-hero-inner { grid-template-columns: 1fr; min-height: 0; gap: 32px; }
+  .lp-hero-card { max-width: 420px; margin: 0 auto; }
+  .lp-hero-text { text-align: center; }
+  .lp-hero-sub { margin-left: auto; margin-right: auto; }
+  .lp-hero-ctas { justify-content: center; }
   .lp-grid { grid-template-columns: repeat(2, 1fr); }
   .lp-trust-grid { grid-template-columns: repeat(2, 1fr); }
   .lp-platform-grid { grid-template-columns: 1fr; }
@@ -649,9 +719,9 @@ section { position: relative; }
   .lp-mobile-menu { display: flex; }
 }
 
+/* Mobile: full-width stacked CTAs so both are comfortable tap targets. */
 @media (max-width: 640px) {
   .lp-hero { padding: 48px 18px 60px; }
-  .lp-hero-logo { height: 44px; }
   .lp-section { padding: 20px 18px 64px; }
   .lp-platform { padding: 0 18px 64px; }
   .lp-trust-band { padding: 64px 18px; }
@@ -659,8 +729,17 @@ section { position: relative; }
   .lp-cta-band { padding: 64px 18px; }
   .lp-grid { grid-template-columns: 1fr; }
   .lp-trust-grid { grid-template-columns: 1fr; }
-  .lp-hero-ctas { flex-direction: column; align-items: stretch; }
-  .lp-hero-ctas .lp-btn { justify-content: center; }
+  .lp-hero-ctas,
+  .lp-cta-actions { flex-direction: column; align-items: stretch; }
+  .lp-hero-ctas .lp-btn,
+  .lp-cta-actions .lp-btn { justify-content: center; }
   .lp-trust-row { gap: 16px 22px; }
   .lp-footer-inner { flex-direction: column; align-items: flex-start; }
+  .lp-byline { font-size: 0.78rem; }
+  .lp-byline img { height: 19px; }
+}
+
+/* The stat card is decorative; below this it costs more height than it earns. */
+@media (max-width: 460px) {
+  .lp-hero-card { display: none; }
 }

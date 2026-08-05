@@ -198,6 +198,32 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ id: row.id, name: row.name, email: row.email, role: row.role });
 });
 
+// Self-service registration. A new account is always created as a Client with
+// no project_access rows, which means accessibleProjectIds() returns [] and
+// every scoped query resolves to nothing — a signup can sign in but sees no
+// data at all until an Admin grants project access and/or changes the role.
+// Registration therefore cannot leak data; it only creates a pending identity.
+app.post('/api/auth/register', (req, res) => {
+  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+  if (userCount === 0) {
+    return res.status(400).json({ error: 'This system has not been set up yet. The first account must be created by an administrator.' });
+  }
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: 'name, email, and password are required' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  const normalised = String(email).trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalised)) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (db.prepare('SELECT id FROM users WHERE email = ?').get(normalised)) {
+    return res.status(409).json({ error: 'An account with that email already exists. Try signing in instead.' });
+  }
+  const info = db
+    .prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)')
+    .run(String(name).trim(), normalised, hashPassword(password), 'Client');
+  const { token, expires } = createSession(info.lastInsertRowid);
+  setSessionCookie(res, token, expires);
+  res.status(201).json(db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(info.lastInsertRowid));
+});
+
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
   const cookies = (req.headers.cookie || '').split(';').map((c) => c.trim());
   const sessionCookie = cookies.find((c) => c.startsWith('session='));
