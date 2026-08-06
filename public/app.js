@@ -6,7 +6,10 @@ const searchResultsEl = document.getElementById('search-results');
 const authRoot = document.getElementById('auth-root');
 const shellEl = document.getElementById('shell');
 
-const ICON_COLORS = ['#1c8a4d', '#2f6fa8', '#b3790f', '#8a4fc9', '#c94a3f', '#0e7c8c'];
+// Stepped for the dark navy surface. The previous set was chosen against a
+// light background and sat at 3.1–4.4:1 here; these clear 5.2:1 against the
+// panel and carry a dark label at 5.9:1 or better.
+const ICON_COLORS = ['#2ec27e', '#5aa9f5', '#e0a020', '#a97ae8', '#f06a5e', '#25b6c9'];
 
 let currentUser = null;
 
@@ -1362,7 +1365,50 @@ function showApp() {
   shellEl.classList.remove('hidden');
   renderUserChip();
   renderSidenav();
+  wireMobileNav();
   router();
+}
+
+// Off-canvas sidebar for phones. Wired once; the shell persists for the
+// lifetime of the session.
+let mobileNavWired = false;
+function wireMobileNav() {
+  if (mobileNavWired) return;
+  const btn = document.getElementById('mobile-menu-btn');
+  const sidebar = document.getElementById('sidebar');
+  const scrim = document.getElementById('sidebar-scrim');
+  if (!btn || !sidebar || !scrim) return;
+  mobileNavWired = true;
+
+  const setOpen = (open) => {
+    sidebar.classList.toggle('is-open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      scrim.hidden = false;
+      // Next frame, so the opacity transition has a starting value to animate from.
+      requestAnimationFrame(() => scrim.classList.add('is-open'));
+    } else {
+      scrim.classList.remove('is-open');
+      setTimeout(() => { scrim.hidden = true; }, 250);
+    }
+    // Stop the page scrolling behind an open drawer.
+    document.body.style.overflow = open ? 'hidden' : '';
+  };
+
+  btn.addEventListener('click', () => setOpen(!sidebar.classList.contains('is-open')));
+  scrim.addEventListener('click', () => setOpen(false));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setOpen(false);
+  });
+  // Navigating should dismiss the drawer, otherwise it covers the page you
+  // just asked for.
+  sidebar.addEventListener('click', (e) => {
+    if (e.target.closest('a')) setOpen(false);
+  });
+  // Returning to desktop width must not leave the drawer state stuck on.
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900 && sidebar.classList.contains('is-open')) setOpen(false);
+  });
 }
 
 function showLoginScreen(errorMsg) {
@@ -1444,6 +1490,14 @@ function renderUserChip() {
     <button id="logout-btn">Logout</button>
   `;
   document.getElementById('logout-btn').addEventListener('click', logout);
+
+  // The desktop chip is hidden on phones, so the mobile bar carries an
+  // avatar that doubles as the sign-out control.
+  const mobileChip = document.getElementById('mobile-user-chip');
+  if (mobileChip) {
+    mobileChip.innerHTML = `<button class="user-chip-avatar" id="mobile-logout-btn" title="${esc(currentUser.name)} — sign out" aria-label="Sign out">${initial(currentUser.name)}</button>`;
+    document.getElementById('mobile-logout-btn').addEventListener('click', logout);
+  }
 }
 
 // ---------- Sidebar ----------

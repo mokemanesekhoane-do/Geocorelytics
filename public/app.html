@@ -2,16 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050e1c" />
   <title>GeoCorelytics</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="charts.css" />
+  <link rel="stylesheet" href="responsive.css" />
 </head>
 <body>
   <div id="auth-root" class="auth-root hidden"></div>
 
   <div class="shell hidden" id="shell">
-    <aside class="sidebar">
+    <!-- Phone-only header. The sidebar becomes a drawer below 900px, so the
+         brand and the menu control have to live somewhere always visible. -->
+    <header class="mobile-bar">
+      <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" aria-controls="sidebar">
+        <span></span><span></span><span></span>
+      </button>
+      <img class="mobile-bar-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" />
+      <div class="mobile-bar-user" id="mobile-user-chip"></div>
+    </header>
+
+    <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+
+    <aside class="sidebar" id="sidebar">
       <div class="brand">
         <img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" />
       </div>

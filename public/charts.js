@@ -14,10 +14,14 @@
 // documented safe limit for this order.
 // ================================================================
 
-const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
-const STATUS = { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b', info: '#2a78d6' };
-const INK = { primary: '#14181a', secondary: '#52514e', muted: '#898781', grid: '#e7e9e5', axis: '#c3c2b7' };
-const SURFACE = '#ffffff';
+// Dark steps of the same eight hues, validated against the navy panel
+// (#0d1f3a): all eight clear 3:1 there, worst adjacent CVD ΔE 8.4 and
+// normal-vision ΔE 19.3. The light-mode steps were re-checked on this
+// surface first and failed — violet fell to 2.2:1 — so they are not reused.
+const SERIES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
+const STATUS = { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b', info: '#3987e5' };
+const INK = { primary: '#eaf2fb', secondary: '#b3c1d6', muted: '#8296b3', grid: '#16325c', axis: '#1d4172' };
+const SURFACE = '#0d1f3a';
 
 let chartSeq = 0;
 const chartData = new Map();

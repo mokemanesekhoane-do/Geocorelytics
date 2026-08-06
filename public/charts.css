@@ -58,18 +58,21 @@
   display: inline-block;
 }
 
+/* Darker than the panel it floats over, with a hairline ring — on a dark
+   theme a tooltip needs an edge to read as lifted rather than as a hole. */
 .chart-tooltip {
   position: absolute;
   z-index: 20;
   pointer-events: none;
-  background: #14181a;
-  color: #fff;
+  background: #030a14;
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 11px;
   font-size: 0.76rem;
   line-height: 1.5;
   min-width: 130px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
 }
 
 .chart-tooltip .tip-title {
@@ -189,8 +192,8 @@
 .hero-unit { font-size: 1.3rem; font-weight: 600; color: var(--text-dim); }
 .hero-sub { font-size: 0.84rem; color: var(--text-dim); }
 
-.delta-good { color: #006300; }
-.delta-bad { color: #c94a3f; }
+.delta-good { color: #5fe0a0; }
+.delta-bad { color: #ff8b8b; }
 
 .stat-row {
   display: grid;
@@ -288,13 +291,13 @@
 }
 
 .is-critical { border-left-color: #d03b3b; }
-.is-critical .rec-sev { background: var(--red-light); color: #a32a2a; }
+.is-critical .rec-sev { background: var(--red-light); color: #ff8b8b; }
 .is-serious { border-left-color: #ec835a; }
-.is-serious .rec-sev { background: #fdf0e9; color: #a75330; }
+.is-serious .rec-sev { background: rgba(236, 131, 90, 0.15); color: #ffab86; }
 .is-warn { border-left-color: #fab219; }
-.is-warn .rec-sev { background: var(--amber-light); color: #8a5c08; }
+.is-warn .rec-sev { background: var(--amber-light); color: #ffd166; }
 .is-info { border-left-color: #2a78d6; }
-.is-info .rec-sev { background: var(--blue-light); color: #1c5cab; }
+.is-info .rec-sev { background: var(--blue-light); color: #8fc4ff; }
 
 .alert-list {
   display: flex;
@@ -334,8 +337,8 @@
   line-height: 1.45;
 }
 
-.validation-msg.is-error { background: var(--red-light); color: #a32a2a; }
-.validation-msg.is-warn { background: var(--amber-light); color: #8a5c08; }
+.validation-msg.is-error { background: var(--red-light); color: #ff8b8b; }
+.validation-msg.is-warn { background: var(--amber-light); color: #ffd166; }
 .validation-msg.is-ok { background: var(--green-light); color: var(--green-dark); }
 
 .form-section-title {
@@ -475,10 +478,10 @@ input.is-derived {
   font-weight: 700;
 }
 
-.rqd-very-poor { background: var(--red-light); color: #a32a2a; }
-.rqd-poor { background: #fdf0e9; color: #a75330; }
-.rqd-fair { background: var(--amber-light); color: #8a5c08; }
-.rqd-good { background: var(--blue-light); color: #1c5cab; }
+.rqd-very-poor { background: var(--red-light); color: #ff8b8b; }
+.rqd-poor { background: rgba(236, 131, 90, 0.15); color: #ffab86; }
+.rqd-fair { background: var(--amber-light); color: #ffd166; }
+.rqd-good { background: var(--blue-light); color: #8fc4ff; }
 .rqd-excellent { background: var(--green-light); color: var(--green-dark); }
 
 /* ---------- Auth ---------- */

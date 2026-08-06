@@ -18,13 +18,23 @@
   --logo-shadow: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55)) drop-shadow(0 6px 18px rgba(0, 0, 0, 0.4));
 }
 
+/* Geist Sans, self-hosted — one variable file for every weight. Same face as
+   the application, so the marketing page and the product read as one thing. */
+@font-face {
+  font-family: 'Geist';
+  src: url('assets/fonts/Geist-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 * { box-sizing: border-box; }
 
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
-  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: 'Geist', -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   background: var(--navy-950);
   color: var(--slate-200);
   -webkit-font-smoothing: antialiased;
