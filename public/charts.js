@@ -35,14 +35,22 @@ function escXml(s) {
 }
 
 // Clean axis ticks: 1/2/5 × 10ⁿ so labels land on round numbers.
+//
+// The axis must reach AT OR ABOVE the largest value. Stopping at the last
+// tick below the maximum leaves the top of the data outside the plot box —
+// with a max of 81 the axis ended at 50, and since py() maps against the axis
+// top, the 81 point landed 104 units above the chart and drew over the card
+// (the SVG is overflow:visible, so nothing clipped it). Round the top up to
+// the next whole step instead.
 function niceTicks(max, count = 4) {
   if (!(max > 0)) return [0];
   const raw = max / count;
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
   const norm = raw / mag;
   const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const top = Math.ceil((max - step * 1e-9) / step) * step;
   const ticks = [];
-  for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(Number(v.toFixed(6)));
+  for (let v = 0; v <= top + step * 0.001; v += step) ticks.push(Number(v.toFixed(6)));
   return ticks;
 }
 
@@ -105,11 +113,41 @@ function lineChart(series, opts = {}) {
   const iw = W - M.left - M.right;
   const ih = H - M.top - M.bottom;
 
-  const xs = clean[0].points.map((p) => p.x);
+  // Axis labels and hover bands run across EVERY series. Taking them from the
+  // first series alone labelled a multi-borehole depth chart with one hole's
+  // depths and left the others unhoverable.
+  const xs = opts.xNumeric
+    ? [...new Set(clean.flatMap((s) => s.points.map((p) => Number(p.x))).filter(Number.isFinite))].sort((a, b) => a - b)
+    : clean[0].points.map((p) => p.x);
   const maxY = Math.max(...clean.flatMap((s) => s.points.map((p) => Number(p.y) || 0)), 0);
   const ticks = niceTicks(maxY || 1);
   const top = ticks[ticks.length - 1] || 1;
-  const px = (i, n) => M.left + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+
+  // Dates arrive one per period, so spacing them by index is right. A depth
+  // series does not: readings at 4.5, 9 and 27.3 m are unevenly spaced, and
+  // laying them out evenly draws a profile that misstates where in the hole
+  // the values came from. When the caller says the axis is numeric, position
+  // by value.
+  // On a value-scaled axis a point's position comes from ITS OWN x, across the
+  // range of EVERY series — not from series 0's array. Each borehole's RQD
+  // profile has different depths and a different point count, so indexing into
+  // the first series drew every other hole at the wrong depths and dropped any
+  // point past the first series' length.
+  const numericX = !!opts.xNumeric;
+  const allX = numericX ? clean.flatMap((s) => s.points.map((p) => Number(p.x))).filter(Number.isFinite) : [];
+  const xMin = allX.length ? Math.min(...allX) : 0;
+  const xMax = allX.length ? Math.max(...allX) : 0;
+  const xSpan = xMax - xMin;
+  // `value` is the point's own x; `i`/`n` remain the index fallback for
+  // evenly-spaced (date) series.
+  const px = (i, n, value) => {
+    if (numericX) {
+      const v = Number(value);
+      if (!(xSpan > 0) || !Number.isFinite(v)) return M.left + iw / 2;
+      return M.left + ((v - xMin) / xSpan) * iw;
+    }
+    return M.left + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+  };
   const py = (v) => M.top + ih - ((Number(v) || 0) / top) * ih;
 
   const grid = ticks
@@ -120,39 +158,47 @@ function lineChart(series, opts = {}) {
   const everyN = Math.max(1, Math.ceil(xs.length / 8));
   const xLabels = xs
     .map((x, i) => (i % everyN === 0 || i === xs.length - 1
-      ? `<text x="${px(i, xs.length)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escXml(opts.xFormat ? opts.xFormat(x) : shortDate(x))}</text>`
+      ? `<text x="${px(i, xs.length, x)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escXml(opts.xFormat ? opts.xFormat(x) : shortDate(x))}</text>`
       : ''))
     .join('');
 
   const paths = clean
     .map((s, si) => {
       const color = s.color || seriesColor(si);
-      const d = s.points.map((p, i) => `${i ? 'L' : 'M'}${px(i, s.points.length).toFixed(1)},${py(p.y).toFixed(1)}`).join(' ');
+      const last = s.points[s.points.length - 1];
+      const d = s.points.map((p, i) => `${i ? 'L' : 'M'}${px(i, s.points.length, p.x).toFixed(1)},${py(p.y).toFixed(1)}`).join(' ');
       const area = s.area
-        ? `<path d="${d} L${px(s.points.length - 1, s.points.length).toFixed(1)},${M.top + ih} L${px(0, s.points.length).toFixed(1)},${M.top + ih} Z" fill="${color}" opacity="0.1"/>`
+        ? `<path d="${d} L${px(s.points.length - 1, s.points.length, last.x).toFixed(1)},${M.top + ih} L${px(0, s.points.length, s.points[0].x).toFixed(1)},${M.top + ih} Z" fill="${color}" opacity="0.1"/>`
         : '';
       const dashed = s.dashed ? ' stroke-dasharray="6 4"' : '';
-      const last = s.points[s.points.length - 1];
       // End-dot carries a 2px surface ring so it stays legible where series cross.
-      const endDot = `<circle cx="${px(s.points.length - 1, s.points.length)}" cy="${py(last.y)}" r="4.5" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`;
-      const endLabel = `<text x="${px(s.points.length - 1, s.points.length) + 9}" y="${py(last.y) + 4}" font-size="11" font-weight="600" fill="${INK.secondary}" style="font-variant-numeric:tabular-nums">${fmtNum(last.y)}</text>`;
+      const endDot = `<circle cx="${px(s.points.length - 1, s.points.length, last.x)}" cy="${py(last.y)}" r="4.5" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`;
+      const endLabel = `<text x="${px(s.points.length - 1, s.points.length, last.x) + 9}" y="${py(last.y) + 4}" font-size="11" font-weight="600" fill="${INK.secondary}" style="font-variant-numeric:tabular-nums">${fmtNum(last.y)}</text>`;
       return `${area}<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${dashed}/>${endDot}${endLabel}`;
     })
     .join('');
 
-  // One hover band per x position drives the crosshair + tooltip.
+  // One hover band per x position drives the crosshair + tooltip. Each band
+  // spans the midpoints to its neighbours, so on a value-scaled axis the hit
+  // areas follow the real spacing instead of assuming even steps.
   const bands = xs
     .map((x, i) => {
-      const bw = iw / Math.max(1, xs.length - 1 || 1);
-      return `<rect class="chart-band" data-i="${i}" x="${px(i, xs.length) - bw / 2}" y="${M.top}" width="${bw}" height="${ih}" fill="transparent"/>`;
+      const here = px(i, xs.length, x);
+      const prev = i > 0 ? px(i - 1, xs.length, xs[i - 1]) : M.left;
+      const next = i < xs.length - 1 ? px(i + 1, xs.length, xs[i + 1]) : M.left + iw;
+      const left = i === 0 ? M.left : (prev + here) / 2;
+      const right = i === xs.length - 1 ? M.left + iw : (here + next) / 2;
+      const w = Math.max(1, right - left);
+      return `<rect class="chart-band" data-i="${i}" x="${left.toFixed(1)}" y="${M.top}" width="${w.toFixed(1)}" height="${ih}" fill="transparent"/>`;
     })
     .join('');
 
   chartData.set(id, {
     type: 'line',
     xs,
+    numericX,
     series: clean.map((s, si) => ({ label: s.label, color: s.color || seriesColor(si), points: s.points })),
-    geom: { M, iw, ih, px: (i) => px(i, xs.length), py },
+    geom: { M, iw, ih, px: (i) => px(i, xs.length, xs[i]), py },
     xFormat: opts.xFormat,
     unit: opts.unit || '',
     onSelect: opts.onSelect,
@@ -422,9 +468,19 @@ function wireCharts(root) {
       svg.querySelectorAll('.chart-band').forEach((band) => {
         band.addEventListener('mousemove', (e) => {
           const i = Number(band.dataset.i);
-          const label = cfg.xFormat ? cfg.xFormat(cfg.xs[i]) : cfg.xs[i];
+          const xv = cfg.xs[i];
+          const label = cfg.xFormat ? cfg.xFormat(xv) : xv;
+          // On a value-scaled axis the x positions are the union across all
+          // series, so a series may have no reading at this x. Match by value
+          // and omit it rather than showing a neighbouring series' number.
           const rows = cfg.series
-            .map((s) => `<div class="tip-row"><span class="chart-swatch" style="background:${s.color}"></span>${escXml(s.label)}<strong>${fmtNum(s.points[i]?.y)}${escXml(cfg.unit)}</strong></div>`)
+            .map((s) => {
+              const pt = cfg.numericX
+                ? s.points.find((p) => Math.abs(Number(p.x) - Number(xv)) < 1e-9)
+                : s.points[i];
+              if (cfg.numericX && !pt) return '';
+              return `<div class="tip-row"><span class="chart-swatch" style="background:${s.color}"></span>${escXml(s.label)}<strong>${fmtNum(pt && pt.y)}${escXml(cfg.unit)}</strong></div>`;
+            })
             .join('');
           show(`<div class="tip-title">${escXml(label)}</div>${rows}`, e.clientX, e.clientY);
           if (crosshair) {

@@ -91,14 +91,14 @@ async function main() {
   const spt = allSamples.filter((s) => s.sample_type === 'SPT' && s.sample_data);
   const wrongN = spt.filter((s) => {
     const d = s.sample_data;
-    return Number(s.spt_n_value) !== Number(d.blows_150_2) + Number(d.blows_150_3);
+    return Number(s.spt_n_value) !== Number(d.blows_150_300) + Number(d.blows_300_450);
   });
-  check('N = 2nd + 3rd increment (seating & 1st excluded)', wrongN.length === 0, `${spt.length} SPT samples`);
+  check('N = blows(150-300) + blows(300-450), seating discarded', wrongN.length === 0, `${spt.length} SPT samples`);
   const sample = spt[0];
   if (sample) {
     const d = sample.sample_data;
-    check('  worked example', Number(sample.spt_n_value) === Number(d.blows_150_2) + Number(d.blows_150_3),
-      `seating ${d.seating_blows} + ${d.blows_150_1}/${d.blows_150_2}/${d.blows_150_3} -> N=${sample.spt_n_value}`);
+    check('  worked example', Number(sample.spt_n_value) === Number(d.blows_150_300) + Number(d.blows_300_450),
+      `seating ${d.seating_blows} discarded, ${d.blows_150_300} + ${d.blows_300_450} -> N=${sample.spt_n_value}`);
   }
 
   // ---------- 4. Decimal fidelity ----------
@@ -188,19 +188,19 @@ async function main() {
     code: `ZZ-VERIFY-${Date.now()}`, total_depth: 50, status: 'Planned',
   })).data;
 
-  const recoveryCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3, core_recovered_m: 9 });
+  const recoveryCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3, date: '2026-08-01', core_recovered_m: 9 });
   check('rejects core recovery exceeding drilled interval', recoveryCase.status === 400 && /core recovered/i.test(recoveryCase.data.error || ''),
     recoveryCase.data && recoveryCase.data.error);
 
-  const rqdCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3, rqd_pct: 140 });
+  const rqdCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3, date: '2026-08-01', rqd_pct: 140 });
   check('rejects out-of-range RQD', rqdCase.status === 400 && /rqd/i.test(rqdCase.data.error || ''), rqdCase.data && rqdCase.data.error);
 
-  const gapCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3 });
-  const gapReject = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 8, depth_to: 10 });
+  const gapCase = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 0, depth_to: 3, date: '2026-08-01' });
+  const gapReject = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 8, depth_to: 10, date: '2026-08-01' });
   check('requires a reason for an unexplained depth gap', gapCase.status === 201 && gapReject.status === 400 && /gap/i.test(gapReject.data.error || ''),
     gapReject.data && String(gapReject.data.error).slice(0, 70));
 
-  const gapAccept = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 8, depth_to: 10, skip_reason: 'Cased through collapsed zone' });
+  const gapAccept = await call('POST', `/api/boreholes/${scratch.id}/runs`, { depth_from: 8, depth_to: 10, date: '2026-08-01', skip_reason: 'Cased through collapsed zone' });
   check('accepts the same gap once justified', gapAccept.status === 201, `HTTP ${gapAccept.status}`);
 
   const noRun = await call('POST', `/api/boreholes/${scratch.id}/samples`, { depth_from: 4, depth_to: 4.5, sample_type: 'SPT', skip_reason: 'x' });

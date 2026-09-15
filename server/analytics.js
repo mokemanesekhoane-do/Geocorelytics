@@ -7,11 +7,67 @@
 // All series are returned as plain {x, y, meta} points so the frontend chart
 // layer stays dumb: it renders what it is given and uses `meta` for drill-down.
 
+const derive = require('../public/derive');
+
 const ROUND = (v, dp = 2) => (v === null || !Number.isFinite(v) ? null : Number(v.toFixed(dp)));
 
-function num(v) {
-  const x = Number(v);
-  return Number.isFinite(x) ? x : null;
+// Number(null) and Number('') are both 0, and 0 is finite — so the obvious
+// coercion silently turns "not recorded" into a measured zero. That put 21 of
+// 30 runs on the RQD-vs-depth chart as 0% readings they never had, and raised
+// low-recovery warnings against runs where no core was logged at all.
+const num = derive.blankToNull;
+
+// Metres a run advanced the hole. Casing is set after drilling, through
+// ground already cut, so it advances nothing and must never be counted.
+function runMetres(r) {
+  if (derive.isCasingRun(r)) return 0;
+  return Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0));
+}
+
+// Spans that account for the hole being deeper.
+//
+// Two different questions are asked of this, and they take different sets:
+//   'advance'  — what made the hole deeper. Runs that cut ground, and
+//                samplers driven ahead of the bit. NOT in-situ tests: a
+//                packer or falling-head section is run in a hole that has
+//                already been drilled, so counting its length would inflate
+//                metres drilled by ground nobody cut.
+//   'coverage' — what the record accounts for, used to tell a genuine break
+//                from the ordinary drill/sample interleave. Tests belong
+//                here: the interval is documented even though it advanced
+//                nothing.
+// Casing is in neither — it re-covers ground already drilled.
+function advanceSpans(runs, samples, tests, mode) {
+  const spans = [];
+  for (const r of runs) {
+    if (derive.isCasingRun(r)) continue;
+    spans.push({ from: num(r.depth_from), to: num(r.depth_to), kind: 'run', ref: r });
+  }
+  for (const s of samples) spans.push({ from: num(s.depth_from), to: num(s.depth_to), kind: 'sample', ref: s });
+  if (mode === 'coverage') {
+    for (const t of tests) spans.push({ from: num(t.depth_from), to: num(t.depth_to), kind: 'test', ref: t });
+  }
+  return spans.filter((s) => s.from !== null && s.to !== null && s.to > s.from);
+}
+
+// Total ground accounted for in a borehole, merging overlapping spans so a
+// sample taken inside a run is not counted twice.
+function mergedLength(spans) {
+  const sorted = [...spans].sort((a, b) => a.from - b.from);
+  let total = 0;
+  let curFrom = null;
+  let curTo = null;
+  for (const s of sorted) {
+    if (curTo === null || s.from > curTo + 1e-9) {
+      if (curTo !== null) total += curTo - curFrom;
+      curFrom = s.from;
+      curTo = s.to;
+    } else if (s.to > curTo) {
+      curTo = s.to;
+    }
+  }
+  if (curTo !== null) total += curTo - curFrom;
+  return total;
 }
 
 // Builds the shared WHERE fragment for drilling_runs from the filter object.
@@ -73,9 +129,14 @@ function compute(db, filters, accessibleIds) {
     )
     .all(...bf.params);
 
+  // Samples and tests carry their own date. Without applying the same
+  // window, a one-day filter merged that day's runs with every sample in the
+  // hole and reported more metres than were drilled that day.
   const sampleWhere = [];
   const sampleParams = [];
   if (f.sample_type) { sampleWhere.push('s.sample_type = ?'); sampleParams.push(f.sample_type); }
+  if (f.date_from) { sampleWhere.push('s.date >= ?'); sampleParams.push(f.date_from); }
+  if (f.date_to) { sampleWhere.push('s.date <= ?'); sampleParams.push(f.date_to); }
   const samples = db
     .prepare(
       `SELECT s.*, b.code AS borehole_code, b.project_id
@@ -88,6 +149,8 @@ function compute(db, filters, accessibleIds) {
   const testWhere = [];
   const testParams = [];
   if (f.test_type) { testWhere.push('t.test_type = ?'); testParams.push(f.test_type); }
+  if (f.date_from) { testWhere.push('t.date >= ?'); testParams.push(f.date_from); }
+  if (f.date_to) { testWhere.push('t.date <= ?'); testParams.push(f.date_to); }
   const tests = db
     .prepare(
       `SELECT t.*, b.code AS borehole_code, b.project_id
@@ -99,10 +162,20 @@ function compute(db, filters, accessibleIds) {
 
   return {
     filters: f,
-    headline: headline(runs, boreholes, samples, tests),
-    production: production(runs),
-    plannedVsActual: plannedVsActual(runs, boreholes),
-    completion: completion(boreholes, runs),
+    // A rig/operator/shift/method filter scopes runs but cannot scope samples
+    // — sample rows carry no crew fields — so under those filters the totals
+    // fall back to run metres rather than mixing a filtered numerator with an
+    // unfiltered one.
+    headline: headline(runs, boreholes, samples, tests, {
+      // Under any filter that scopes samples differently from runs — crew
+      // fields samples do not carry, or a sample-type filter that hides some
+      // of them — metres fall back to run metres alone rather than mixing two
+      // populations. advance_basis reports which is being shown.
+      crewScoped: !!(f.rig || f.operator || f.shift || f.drilling_method || f.sample_type),
+    }),
+    production: production(runs, samples),
+    plannedVsActual: plannedVsActual(runs, boreholes, samples),
+    completion: completion(boreholes, runs, samples),
     sampleRecovery: sampleRecovery(samples),
     depthDistribution: depthDistribution(samples, tests),
     downtime: downtime(runs),
@@ -117,23 +190,81 @@ function compute(db, filters, accessibleIds) {
 
 // ---------- Headline figures ----------
 
-function headline(runs, boreholes, samples, tests) {
-  const metres = runs.reduce((a, r) => a + Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0)), 0);
+function headline(runs, boreholes, samples, tests, opts) {
+  opts = opts || {};
+  // Metres the bit cut. Casing is excluded — it re-covers drilled ground.
+  const runM = runs.reduce((a, r) => a + runMetres(r), 0);
+
+  // Metres the hole actually gained, counting samplers driven ahead of the
+  // bit. Overlaps are merged so a sample inside a run is not double-counted.
+  // Sample rows carry no rig/shift/method (only a date and operator), so
+  // sampler-advanced metres cannot be attributed under those filters — there
+  // the honest figure is run metres alone, and `advance_basis` says which is
+  // being shown rather than letting the two silently disagree.
+  const byBh = new Map();
+  for (const s of advanceSpans(runs, samples, tests, 'advance')) {
+    const id = (s.ref && s.ref.borehole_id) || 0;
+    if (!byBh.has(id)) byBh.set(id, []);
+    byBh.get(id).push(s);
+  }
+  let advanced = 0;
+  byBh.forEach((spans) => { advanced += mergedLength(spans); });
+
+  const attributable = !opts.crewScoped;
+  const metres = attributable ? advanced : runM;
+
+  // How much of that total no daily chart can place, because the underlying
+  // record carries no date. Measured as the difference the undated records
+  // make to the merged total — not their raw length — so a span that overlaps
+  // a dated run is not counted twice and
+  // `daily cumulative + undated_metres` always equals `total_metres`.
+  const datedByBh = new Map();
+  let undatedRecords = 0;
+  for (const s of advanceSpans(runs, samples, tests, 'advance')) {
+    if (!s.ref || !s.ref.date) { undatedRecords += 1; continue; }
+    const id = s.ref.borehole_id || 0;
+    if (!datedByBh.has(id)) datedByBh.set(id, []);
+    datedByBh.get(id).push(s);
+  }
+  let datedAdvanced = 0;
+  datedByBh.forEach((spans) => { datedAdvanced += mergedLength(spans); });
+  const undatedM = Math.max(0, advanced - datedAdvanced);
+
+  // Casing still consumes shift time and still breaks down, so days, downtime
+  // and the downtime ratio count every run.
   const days = new Set(runs.map((r) => r.date).filter(Boolean));
   const downMin = runs.reduce((a, r) => a + (num(r.downtime_min) ?? 0), 0);
-  const drillMin = runs.reduce((a, r) => a + (num(r.drilling_time_min) ?? 0), 0);
-  const cored = runs.reduce((a, r) => a + (num(r.core_recovered_m) ?? 0), 0);
-  const coredIntervals = runs
-    .filter((r) => num(r.core_recovered_m) !== null)
-    .reduce((a, r) => a + Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0)), 0);
+  // Only runs that actually recorded drilling time can contribute to the
+  // ratio. Treating an unrecorded value as zero drilling time drove the
+  // percentage toward 100 and fired a false "Excessive downtime".
+  const timed = runs.filter((r) => num(r.drilling_time_min) !== null);
+  const drillMin = timed.reduce((a, r) => a + (num(r.drilling_time_min) ?? 0), 0);
+  const timedDownMin = timed.reduce((a, r) => a + (num(r.downtime_min) ?? 0), 0);
+
+  const coredRuns = runs.filter((r) => !derive.isCasingRun(r) && num(r.core_recovered_m) !== null);
+  const cored = coredRuns.reduce((a, r) => a + (num(r.core_recovered_m) ?? 0), 0);
+  const coredIntervals = coredRuns.reduce((a, r) => a + runMetres(r), 0);
+
+  const advancingRuns = runs.filter((r) => !derive.isCasingRun(r));
   return {
     total_metres: ROUND(metres),
+    run_metres: ROUND(runM),
+    sampler_advanced_metres: ROUND(Math.max(0, advanced - runM)),
+    advance_basis: attributable ? 'runs + sampler advance' : 'drilling runs only (crew filter applied)',
+    // Metres in the total that no daily chart can show, because the record
+    // carries no date. Reported so the gap between the total and the end of
+    // the cumulative line is always explained rather than unaccounted for.
+    undated_metres: ROUND(undatedM),
+    undated_records: undatedRecords,
+    casing_runs: runs.length - advancingRuns.length,
     total_runs: runs.length,
     drilling_days: days.size,
     avg_metres_per_day: days.size ? ROUND(metres / days.size) : null,
-    avg_metres_per_run: runs.length ? ROUND(metres / runs.length) : null,
+    // Per-run average divides by the runs that actually cut ground, so adding
+    // casing to a hole cannot appear to reduce how well it was drilled.
+    avg_metres_per_run: advancingRuns.length ? ROUND(runM / advancingRuns.length) : null,
     total_downtime_hours: ROUND(downMin / 60),
-    downtime_pct: drillMin + downMin > 0 ? ROUND((downMin / (drillMin + downMin)) * 100, 1) : null,
+    downtime_pct: timed.length && drillMin + timedDownMin > 0 ? ROUND((timedDownMin / (drillMin + timedDownMin)) * 100, 1) : null,
     core_recovery_pct: coredIntervals > 0 ? ROUND((cored / coredIntervals) * 100, 1) : null,
     total_samples: samples.length,
     total_tests: tests.length,
@@ -144,35 +275,89 @@ function headline(runs, boreholes, samples, tests) {
 
 // ---------- Daily + cumulative production ----------
 
-function production(runs) {
+function production(runs, samples) {
+  // Daily production is metres the HOLE GAINED that day, which is the same
+  // definition the headline uses. A sampler driven ahead of the bit advances
+  // the hole, and samples carry their own date, so those metres are counted
+  // on the day they were achieved. Summing run intervals alone left the
+  // cumulative line ending below the total shown directly above it.
+  //
+  // Spans are merged per day so a sample taken inside that day's run is not
+  // counted twice.
+  const spansByDate = new Map();
   const byDate = new Map();
+  // A run or sample saved before a date was mandatory has nowhere to sit on a
+  // date axis. Dropping it silently is what left the cumulative line ending
+  // below the total printed above it, so it is collected separately and
+  // reported rather than discarded.
+  const undated = [];
+  // Depths are only comparable within one hole. Merging every borehole's spans
+  // into one list made two holes that both start at surface overlap, so a
+  // project with BH-01 at 0-20 m and BH-02 at 0-15 m reported 20 m instead of
+  // 35 m — under the headline, which merges per hole.
+  const addSpan = (date, from, to, boreholeId) => {
+    if (from === null || to === null || to <= from) return;
+    const span = { from, to, bh: boreholeId ?? 0 };
+    if (!date) { undated.push(span); return; }
+    if (!spansByDate.has(date)) spansByDate.set(date, []);
+    spansByDate.get(date).push(span);
+  };
+
+  // Merged length of a mixed-borehole span list, each hole merged on its own.
+  const mergedByBorehole = (spans) => {
+    const byBh = new Map();
+    for (const s of spans) {
+      if (!byBh.has(s.bh)) byBh.set(s.bh, []);
+      byBh.get(s.bh).push(s);
+    }
+    let total = 0;
+    byBh.forEach((list) => { total += mergedLength(list); });
+    return total;
+  };
+
   for (const r of runs) {
+    if (!derive.isCasingRun(r)) addSpan(r.date, num(r.depth_from), num(r.depth_to), r.borehole_id);
     if (!r.date) continue;
-    const m = Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0));
-    const cur = byDate.get(r.date) || { metres: 0, runs: 0, downtime: 0, shifts: new Set() };
-    cur.metres += m;
+    const cur = byDate.get(r.date) || { runs: 0, downtime: 0, shifts: new Set(), samples: 0 };
     cur.runs += 1;
     cur.downtime += num(r.downtime_min) ?? 0;
     if (r.shift) cur.shifts.add(r.shift);
     byDate.set(r.date, cur);
   }
+  for (const s of samples || []) {
+    addSpan(s.date, num(s.depth_from), num(s.depth_to), s.borehole_id);
+    if (!s.date) continue;
+    const cur = byDate.get(s.date) || { runs: 0, downtime: 0, shifts: new Set(), samples: 0 };
+    cur.samples += 1;
+    byDate.set(s.date, cur);
+  }
+
+  // Each day's figure is the NEW ground the hole gained, measured as the
+  // merged total through that day minus the merged total through the day
+  // before. Merging each day in isolation would count a sample that reaches
+  // back into an earlier day's run twice; this cannot, and it guarantees the
+  // cumulative line ends exactly on the headline total.
   const dates = [...byDate.keys()].sort();
-  let cum = 0;
+  const seen = [];
+  let prevTotal = 0;
   const daily = dates.map((d) => {
     const v = byDate.get(d);
-    cum += v.metres;
+    seen.push(...(spansByDate.get(d) || []));
+    const total = mergedByBorehole(seen);
+    const gained = Math.max(0, total - prevTotal);
+    prevTotal = total;
     return {
       x: d,
-      y: ROUND(v.metres),
-      cumulative: ROUND(cum),
-      meta: { runs: v.runs, downtime_hours: ROUND(v.downtime / 60), shifts: [...v.shifts] },
+      y: ROUND(gained),
+      cumulative: ROUND(total),
+      meta: { runs: v.runs, samples: v.samples, downtime_hours: ROUND(v.downtime / 60), shifts: [...v.shifts] },
     };
   });
 
   const shiftTotals = new Map();
   for (const r of runs) {
     const key = r.shift || 'Unspecified';
-    const m = Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0));
+    const m = runMetres(r);
     const cur = shiftTotals.get(key) || { metres: 0, count: 0, dates: new Set() };
     cur.metres += m;
     cur.count += 1;
@@ -185,7 +370,13 @@ function production(runs) {
     meta: { total_metres: ROUND(v.metres), runs: v.count, days: v.dates.size },
   }));
 
-  return { daily, perShift };
+  // Ground that only an undated record covers. Measured as the difference the
+  // undated spans make to the merged total, not their raw length, so a span
+  // that overlaps a dated run is not counted twice and
+  // `cumulative + undated_metres` always equals the headline total.
+  const undatedMetres = undated.length ? mergedByBorehole([...seen, ...undated]) - prevTotal : 0;
+
+  return { daily, perShift, undated_metres: ROUND(undatedMetres) };
 }
 
 // ---------- Planned vs actual ----------
@@ -196,7 +387,7 @@ function production(runs) {
 // fall back to total_depth so a project that never captured a plan still gets a
 // meaningful comparison rather than an empty chart.
 
-function plannedVsActual(runs, boreholes) {
+function plannedVsActual(runs, boreholes, samples) {
   const target = boreholes.reduce((a, b) => a + (num(b.planned_depth) ?? num(b.total_depth) ?? 0), 0);
   const starts = boreholes.map((b) => b.planned_start_date || b.start_date).filter(Boolean).sort();
   const ends = boreholes.map((b) => b.planned_end_date || b.end_date).filter(Boolean).sort();
@@ -206,12 +397,12 @@ function plannedVsActual(runs, boreholes) {
   const end = ends[ends.length - 1] || runDates[runDates.length - 1] || null;
   if (!start || !end || target <= 0) return { target: ROUND(target), points: [], on_track: null };
 
+  // Reuse the daily series so the "actual" curve, the production chart and
+  // the headline are all the same number. Computing it independently from run
+  // intervals here is what let the variance disagree with the total shown
+  // beside it.
   const byDate = new Map();
-  for (const r of runs) {
-    if (!r.date) continue;
-    const m = Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0));
-    byDate.set(r.date, (byDate.get(r.date) || 0) + m);
-  }
+  for (const d of production(runs, samples).daily) byDate.set(d.x, d.y);
 
   const dayMs = 86400000;
   const startMs = Date.parse(start);
@@ -244,7 +435,10 @@ function plannedVsActual(runs, boreholes) {
 
 // ---------- Borehole completion + ETA ----------
 
-function completion(boreholes, runs) {
+// The samples argument is optional so existing callers keep working; when
+// supplied, the hole depth includes ground a sampler advanced, which is what
+// the borehole page and the dashboard ring report as "current depth".
+function completion(boreholes, runs, samples) {
   const runsByBh = new Map();
   for (const r of runs) {
     const arr = runsByBh.get(r.borehole_id) || [];
@@ -254,8 +448,17 @@ function completion(boreholes, runs) {
   return boreholes
     .map((b) => {
       const rs = runsByBh.get(b.id) || [];
-      const drilled = rs.reduce((a, r) => a + Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0)), 0);
-      const deepest = rs.length ? Math.max(...rs.map((r) => num(r.depth_to) ?? 0)) : 0;
+      // Casing neither advances the hole nor deepens it.
+      const advancing = rs.filter((r) => !derive.isCasingRun(r));
+      const drilled = advancing.reduce((a, r) => a + runMetres(r), 0);
+      // A sampler driven ahead of the bit leaves the hole deeper than the
+      // last run. Measuring depth from runs alone reported a shallower hole
+      // than the register, the next-run prefill and the validation layer all
+      // agree it is.
+      const bhSamples = (samples || []).filter((s) => s.borehole_id === b.id);
+      const deepestRun = advancing.length ? Math.max(...advancing.map((r) => num(r.depth_to) ?? 0)) : 0;
+      const deepestSample = bhSamples.length ? Math.max(...bhSamples.map((s) => num(s.depth_to) ?? 0)) : 0;
+      const deepest = Math.max(deepestRun, deepestSample);
       const targetDepth = num(b.planned_depth) ?? num(b.total_depth) ?? null;
       const pct = targetDepth && targetDepth > 0 ? Math.min(100, (deepest / targetDepth) * 100) : null;
 
@@ -375,7 +578,7 @@ function byDimension(runs, field, fallback) {
   for (const r of runs) {
     const key = r[field] || fallback;
     const cur = map.get(key) || { metres: 0, runs: 0, downtime: 0, drillTime: 0, dates: new Set() };
-    cur.metres += Math.max(0, (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0));
+    cur.metres += runMetres(r);
     cur.runs += 1;
     cur.downtime += num(r.downtime_min) ?? 0;
     cur.drillTime += num(r.drilling_time_min) ?? 0;
@@ -423,7 +626,14 @@ function dataQuality(runs, samples, tests, boreholes) {
 
   for (const r of runs) {
     const label = `${r.borehole_code} run ${r.run_number ?? '?'} (${r.depth_from}–${r.depth_to} m)`;
-    if (!r.date) push('warning', `${label}: no date recorded`, { borehole_id: r.borehole_id, run_id: r.id });
+    // An undated run still counts toward metres drilled but cannot be placed
+    // on any date axis, so it is the reason a cumulative line can end below
+    // the total beside it. Serious, not a warning: it makes the charts wrong.
+    if (!r.date) {
+      push('serious', `${label}: no date recorded — these metres cannot appear on any daily or planned-vs-actual chart`, {
+        borehole_id: r.borehole_id, run_id: r.id,
+      });
+    }
     if (!r.operator_name) push('warning', `${label}: no operator recorded`, { borehole_id: r.borehole_id, run_id: r.id });
     if (!r.drilling_method) push('warning', `${label}: no drilling method recorded`, { borehole_id: r.borehole_id, run_id: r.id });
     const interval = (num(r.depth_to) ?? 0) - (num(r.depth_from) ?? 0);
@@ -498,13 +708,34 @@ function recommendations(runs, samples, tests, boreholes) {
       }
     }
 
-    // Interval continuity gaps between consecutive runs.
-    const sorted = [...rs].sort((a, b) => (num(a.depth_from) ?? 0) - (num(b.depth_from) ?? 0));
-    for (let i = 1; i < sorted.length; i++) {
-      const gap = (num(sorted[i].depth_from) ?? 0) - (num(sorted[i - 1].depth_to) ?? 0);
-      if (gap > 1e-6 && !sorted[i].skip_reason) {
-        add('serious', `Unexplained depth gap in ${code}`, `${ROUND(gap)} m gap between ${sorted[i - 1].depth_to} m and ${sorted[i].depth_from} m with no reason recorded.`, { borehole_id: bhId, run_id: sorted[i].id });
+    // Breaks in the record of the hole. Judged across runs, samples AND tests
+    // together: a sampler driven ahead of the bit advances the hole, so the
+    // stretch between one run ending and the next beginning is usually the
+    // SPT that made it — not missing data. Comparing runs to each other in
+    // isolation reported every one of those as an unexplained gap.
+    const bhSpans = advanceSpans(
+      rs,
+      samples.filter((s) => s.borehole_id === bhId),
+      tests.filter((t) => t.borehole_id === bhId),
+      'coverage'
+    ).sort((a, b) => a.from - b.from);
+
+    let covered = null;
+    for (const span of bhSpans) {
+      if (covered !== null && span.from > covered + 1e-6) {
+        // Only a run can be held responsible for continuing the hole, and
+        // only if nothing else accounts for the ground.
+        const responsible = span.kind === 'run' ? span.ref : null;
+        if (!responsible || !responsible.skip_reason) {
+          add(
+            'serious',
+            `Unexplained depth gap in ${code}`,
+            `${ROUND(span.from - covered)} m between ${ROUND(covered)} m and ${ROUND(span.from)} m is not accounted for by any drilling run, sample or test, and no reason is recorded.`,
+            { borehole_id: bhId, run_id: responsible ? responsible.id : undefined }
+          );
+        }
       }
+      if (covered === null || span.to > covered) covered = span.to;
     }
   }
 
@@ -611,4 +842,6 @@ function dimensions(db, accessibleIds) {
   };
 }
 
-module.exports = { compute };
+// completion() is exported so the dashboard's progress ring can show work
+// done rather than holes finished, without duplicating the per-borehole maths.
+module.exports = { compute, completion, production, advanceSpans, mergedLength, runMetres };

@@ -400,6 +400,177 @@
   color: var(--text-dim);
 }
 
+/* ---------- Site map ---------- */
+
+.site-map-shell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.site-map-canvas {
+  height: 420px;
+  width: 100%;
+  background: var(--shell-bg);
+}
+
+/* Leaflet ships light-theme chrome; these pull its panes, popups and controls
+   onto the dark surface so the map does not sit in the page as a white slab. */
+.site-map-canvas .leaflet-tile-pane { filter: brightness(0.82) saturate(0.85); }
+.site-map-canvas .leaflet-control-attribution,
+.site-map-canvas .leaflet-control-scale-line {
+  background: rgba(5, 14, 28, 0.82);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+.site-map-canvas .leaflet-control-attribution a { color: var(--accent); }
+.site-map-canvas .leaflet-bar a {
+  background: var(--panel);
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+.site-map-canvas .leaflet-bar a:hover { background: var(--panel-raised); }
+.site-map-canvas .leaflet-popup-content-wrapper,
+.site-map-canvas .leaflet-popup-tip {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+.site-map-canvas .leaflet-popup-content a { color: var(--accent); }
+
+.site-map-label {
+  background: rgba(5, 14, 28, 0.78);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  box-shadow: none;
+}
+.site-map-label::before { display: none; }
+
+.site-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+
+.site-map-legend .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.site-map-offline { color: var(--amber); margin-left: auto; }
+
+@media (max-width: 720px) {
+  .site-map-canvas { height: 320px; }
+  .site-map-offline { margin-left: 0; }
+}
+
+/* ---------- Dashboard progress ring ---------- */
+
+.ring-caption {
+  margin: 12px 0 4px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.hole-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  margin-top: 10px;
+}
+
+.hole-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.hole-progress:hover .hole-progress-code { color: var(--accent); }
+
+.hole-progress-code {
+  flex: 0 0 82px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hole-progress-track {
+  flex: 1;
+  height: 7px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.hole-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.hole-progress-pct {
+  flex: 0 0 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Modal header + close ---------- */
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+
+.modal-head h3 { margin: 0; flex: 1; }
+
+.modal-close {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  font-size: 1.5rem;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.modal-close:hover {
+  background: var(--red-light);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* The dialog sits above a scrim that no longer dismisses on click, so make it
+   read as inert rather than as a tappable surface. */
+.modal-backdrop { cursor: default; }
+
 /* ---------- Derived values ---------- */
 
 .derived-panel {
@@ -527,4 +698,19 @@ input.is-derived {
   .chart-grid { grid-template-columns: 1fr; }
   .hero-value { font-size: 2.2rem; }
   .filter-item { flex-basis: 100%; }
+}
+
+.hero-basis {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  opacity: 0.85;
+  display: block;
+}
+
+/* An unexplained gap between the headline and the charts is a data fault, not
+   a footnote — it gets the warning colour at full opacity. */
+.hero-basis.hero-warn {
+  color: var(--amber);
+  opacity: 1;
+  margin-top: 0.25rem;
 }

@@ -1,4 +1,6 @@
 const { DatabaseSync } = require('node:sqlite');
+// Same blank-vs-zero rule the rest of the stack uses.
+const { blankToNull } = require('../public/derive');
 const path = require('node:path');
 
 const dbPath = path.join(__dirname, '..', 'data', 'drilling.db');
@@ -309,6 +311,55 @@ addColumnIfMissing('boreholes', 'planned_end_date', 'TEXT');
 // hole advances by what was actually achieved, not by the nominal drive.
 addColumnIfMissing('samples', 'penetration_achieved_mm', 'REAL');
 addColumnIfMissing('samples', 'short_penetration_reason', 'TEXT');
+
+// Casing is set after drilling, from surface down through ground already cut,
+// so a casing run deliberately re-covers drilled depth. It needs its own
+// marker rather than being inferred from drilling_status, which is a
+// user-extensible lookup an operator can add free-text values to.
+//
+// Deliberately nullable with no NOT NULL default: every INSERT names each
+// RUN_FIELDS column explicitly, so a column default would never apply and an
+// omitted value would write an explicit NULL into a NOT NULL column — a 500
+// on every run POST from any caller that does not send the field. Readers
+// treat NULL as 'Drilling'.
+addColumnIfMissing('drilling_runs', 'run_type', 'TEXT');
+
+// SPT blow counts: the drive is 450 mm in three 150 mm increments, the first
+// of which is the seating drive. The old shape carried a separate seating
+// field PLUS three increments, describing a 600 mm drive that is not the
+// test. Map the old columns onto the correct bands and recompute N, which
+// was being summed from the wrong two increments.
+(function migrateSptIncrements() {
+  const rows = db
+    .prepare("SELECT id, sample_data, spt_n_value FROM samples WHERE sample_type = 'SPT' AND sample_data LIKE '%blows_150_%'")
+    .all();
+  if (!rows.length) return;
+  const update = db.prepare('UPDATE samples SET sample_data = ?, spt_n_value = ? WHERE id = ?');
+  let migrated = 0;
+  for (const row of rows) {
+    let data;
+    try { data = JSON.parse(row.sample_data); } catch (_) { continue; }
+    if (data.blows_150_1 === undefined && data.blows_150_2 === undefined) continue;
+    // Old blows_150_1 covered 150–300 mm and blows_150_2 covered 300–450 mm —
+    // already the right bands. blows_150_3 described 450–600 mm, which the
+    // test does not include, so it is dropped rather than folded in.
+    data.blows_150_300 = data.blows_150_1 ?? null;
+    data.blows_300_450 = data.blows_150_2 ?? null;
+    delete data.blows_150_1;
+    delete data.blows_150_2;
+    delete data.blows_150_3;
+    // Blank increments are stored as empty strings by the capture form, and
+    // Number('') is 0 — coercing them directly would write a fabricated N of
+    // 0 over whatever the record actually held. A drive with no counts keeps
+    // a null N instead of gaining a measured-looking one.
+    const a = blankToNull(data.blows_150_300);
+    const b = blankToNull(data.blows_300_450);
+    const n = a !== null && b !== null ? a + b : null;
+    update.run(JSON.stringify(data), n, row.id);
+    migrated++;
+  }
+  if (migrated) console.log(`Migrated ${migrated} SPT sample(s) to the 450 mm three-increment shape`);
+})();
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_samples_run ON samples(run_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tests_run ON tests(run_id)`);

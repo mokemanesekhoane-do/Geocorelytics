@@ -70,7 +70,7 @@ async function main() {
     sample_type: 'SPT', sample_ref: 'WF-SPT-01',
     depth_from: 6.0, depth_to: 6.45, penetration_achieved_mm: 450,
     date: '2026-08-01', spt_n_value: 21,
-    sample_data: { blows_150_1: 7, blows_150_2: 9, blows_150_3: 12, penetration_length_mm: 450 },
+    sample_data: { seating_blows: 7, blows_150_300: 9, blows_300_450: 12, penetration_length_mm: 450 },
   }));
   check('accepted below the drilled depth', spt1.status === 201, spt1.status === 201 ? '6.00–6.45 m' : spt1.data.error);
   check('linked to the run that reached 6.00 m', spt1.data && spt1.data.run_id === run1.id);
@@ -118,20 +118,20 @@ async function main() {
   // earlier check — otherwise the assertion proves nothing.
   console.log('\nRQD bounds');
   for (const [v, label] of [[-5, 'below 0'], [105, 'above 100']]) {
-    const r = await call('POST', `/api/boreholes/${bh.id}/runs`, { depth_from: 9.75, depth_to: 11, rqd_pct: v, drilling_time_min: 30 });
+    const r = await call('POST', `/api/boreholes/${bh.id}/runs`, { depth_from: 9.75, depth_to: 11, date: '2026-08-01', rqd_pct: v, drilling_time_min: 30 });
     check(`rejects RQD ${label}`, r.status === 400 && /rqd/i.test(r.data.error || ''), r.data && r.data.error);
   }
 
   // ---------- Override + audit ----------
   console.log('\nOverride of a calculated value');
   const noReason = await call('POST', `/api/boreholes/${bh.id}/runs`, {
-    depth_from: 9.75, depth_to: 12, drilling_time_min: 60, penetration_rate_override: 7.5,
+    depth_from: 9.75, depth_to: 12, date: '2026-08-01', drilling_time_min: 60, penetration_rate_override: 7.5,
   });
   check('override without a reason is rejected', noReason.status === 400 && /reason/i.test(noReason.data.error || ''),
     noReason.data && noReason.data.error);
 
   const withReason = await call('POST', `/api/boreholes/${bh.id}/runs`, {
-    run_number: 3, depth_from: 9.75, depth_to: 12, drilling_time_min: 60,
+    run_number: 3, depth_from: 9.75, depth_to: 12, date: '2026-08-01', drilling_time_min: 60,
     penetration_rate_override: 7.5, override_reason: 'Timer left running through a rod change',
   });
   check('override accepted with a reason', withReason.status === 201 && near(withReason.data.penetration_rate_m_hr, 7.5),
@@ -148,6 +148,140 @@ async function main() {
     sample_type: 'Shelby', depth_from: 25, depth_to: 25.6,
   });
   check('sample below the hole bottom rejected', undrilled.status === 400, undrilled.data && String(undrilled.data.error).slice(0, 70));
+
+  // ---------- The link must SURVIVE the next run ----------
+  // The original version of this script asserted the sample-to-run link
+  // immediately after inserting the sample, before the next run existed. That
+  // ordering hid a real defect: relinking keyed on the DEEPEST run, so every
+  // bottom-of-hole sample silently unlinked the moment the hole went deeper.
+  // Re-read the sample now, with three runs above it.
+  console.log('\nLink persistence (re-read after later runs exist)');
+  const allSamples = (await call('GET', `/api/boreholes/${bh.id}/samples`)).data;
+  const firstSpt = allSamples.find((s) => s.sample_ref === 'WF-SPT-01');
+  check('bottom-of-hole sample still linked after later runs', !!(firstSpt && firstSpt.run_id),
+    firstSpt ? `run_id=${firstSpt.run_id}` : 'sample missing');
+  check('still linked to the run that reached its start depth', firstSpt && firstSpt.run_id === run1.id,
+    firstSpt && `expected run1=${run1.id}, got ${firstSpt.run_id}`);
+  check('no sample left unlinked', allSamples.every((s) => s.run_id), `${allSamples.filter((s) => s.run_id).length}/${allSamples.length} linked`);
+
+  // ---------- Active drilling time off the clock ----------
+  console.log('\nActive drilling time derived from start/end time');
+  const clocked = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 4, depth_from: 12, depth_to: 15, date: '2026-08-02',
+    start_time: '07:00', end_time: '15:30', downtime_min: 45,
+  });
+  check('derived from the clock, less downtime', clocked.status === 201 && near(clocked.data.drilling_time_min, 465),
+    `07:00–15:30 = 510 min, less 45 = ${clocked.data && clocked.data.drilling_time_min} min`);
+  check('rate uses the derived active time', near(clocked.data.penetration_rate_m_hr, 3 / (465 / 60)),
+    `${clocked.data && clocked.data.penetration_rate_m_hr} m/h`);
+
+  const night = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 5, depth_from: 15, depth_to: 17, date: '2026-08-02',
+    start_time: '22:00', end_time: '04:00', downtime_min: 60,
+  });
+  check('night shift crossing midnight is not negative', night.status === 201 && near(night.data.drilling_time_min, 300),
+    `22:00–04:00 = 360 min, less 60 = ${night.data && night.data.drilling_time_min} min`);
+
+  // ---------- RQD ----------
+  console.log('\nRQD');
+  const noRqd = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 6, depth_from: 17, depth_to: 18, date: '2026-08-02', start_time: '08:00', end_time: '09:00',
+  });
+  check('a blank RQD is NOT classified', noRqd.status === 201 && noRqd.data.rqd_classification === null,
+    `classification: ${JSON.stringify(noRqd.data && noRqd.data.rqd_classification)} (was fabricating "Very Poor")`);
+
+  // ---------- Casing ----------
+  console.log('\nCasing run over already-drilled ground');
+  const casing = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 7, run_type: 'Casing', depth_from: 0, depth_to: 12, date: '2026-08-02',
+    drilling_status: 'Casing', remarks: 'Cased to 12 m after drilling',
+  });
+  check('casing may overlap drilled ground', casing.status === 201, casing.status === 201 ? '0–12 m over drilled ground' : casing.data.error);
+  check('casing does not need to continue from the last run', casing.status === 201);
+
+  const afterCasing = (await call('GET', `/api/boreholes/${bh.id}/next-run`)).data;
+  check('casing does not move the hole bottom', near(afterCasing.depth_from, 18), `next run still starts at ${afterCasing.depth_from} m`);
+
+  const anaC = (await call('GET', `/api/analytics?borehole_id=${bh.id}`)).data;
+  check('casing excluded from metres drilled', near(anaC.headline.total_metres, 18, 0.02),
+    `${anaC.headline.total_metres} m — casing's 12 m not double-counted`);
+  check('casing counted as a run but reported separately', anaC.headline.casing_runs === 1, `${anaC.headline.casing_runs} casing run(s)`);
+
+  const casingBeyond = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 8, run_type: 'Casing', depth_from: 0, depth_to: 28, date: '2026-08-02',
+  });
+  check('casing past the hole bottom is refused', casingBeyond.status === 400 && /only reached/i.test(casingBeyond.data.error || ''),
+    casingBeyond.data && String(casingBeyond.data.error).slice(0, 62));
+
+  // ---------- The hero figure and every chart must agree ----------
+  // Metres were previously defined three different ways in one response: the
+  // headline merged sampler advance and excluded casing, while the daily,
+  // per-shift, rig and planned-vs-actual figures summed raw run intervals.
+  // A cased hole showed ~2x the metres on the chart beside the total.
+  console.log('\nAll metre figures agree');
+  const ana = (await call('GET', `/api/analytics?borehole_id=${bh.id}`)).data;
+  const lastDaily = ana.production.daily[ana.production.daily.length - 1];
+  const lastPva = ana.plannedVsActual.points.length ? ana.plannedVsActual.points[ana.plannedVsActual.points.length - 1] : null;
+  check('daily cumulative ends on the headline total', lastDaily && near(lastDaily.cumulative, ana.headline.total_metres, 0.02),
+    `headline ${ana.headline.total_metres} m vs chart ${lastDaily && lastDaily.cumulative} m`);
+  if (lastPva) {
+    check('planned-vs-actual uses the same total', near(lastPva.actual, ana.headline.total_metres, 0.02),
+      `actual ${lastPva.actual} m`);
+  }
+  check('the headline says what it is counting', !!ana.headline.advance_basis,
+    `${ana.headline.advance_basis} — ${ana.headline.run_metres} m cut + ${ana.headline.sampler_advanced_metres} m sampler`);
+  check('nothing in the total is missing from the charts', ana.headline.undated_metres === 0,
+    `${ana.headline.undated_metres} m undated`);
+  check('rig metres exclude casing', ana.equipment.every((e) => e.y <= ana.headline.total_metres + 0.02),
+    ana.equipment.map((e) => `${e.x}: ${e.y} m`).join(', '));
+
+  // A date window scopes runs; samples and tests carry their own date and must
+  // be scoped to the same window or the total counts metres from other days.
+  const oneDay = (await call('GET', `/api/analytics?borehole_id=${bh.id}&date_from=2026-08-01&date_to=2026-08-01`)).data;
+  const dailySum = oneDay.production.daily.reduce((a, d) => a + d.y, 0);
+  check('a date filter scopes samples too', near(oneDay.headline.total_metres, dailySum, 0.02),
+    `total ${oneDay.headline.total_metres} m vs daily sum ${dailySum.toFixed(2)} m`);
+
+  // A blank reading is not a measured zero anywhere in the stack.
+  const blanks = (await call('GET', `/api/analytics?borehole_id=${bh.id}`)).data;
+  // Runs 4-7 were created with no rqd_pct. Before the blank guard they each
+  // arrived as a measured 0%, putting phantom points on the chart and
+  // labelling the rock "Very Poor".
+  const runsNow = (await call('GET', `/api/boreholes/${bh.id}/runs`)).data;
+  const withRqd = runsNow.filter((r) => r.rqd_pct !== null && r.rqd_pct !== undefined).length;
+  check('RQD chart plots only runs that recorded an RQD', blanks.groundConditions.rqd.length === withRqd,
+    `${blanks.groundConditions.rqd.length} plotted, ${withRqd} of ${runsNow.length} runs have a value`);
+  check('no run without RQD is classified', runsNow.every((r) => (r.rqd_pct === null || r.rqd_pct === undefined) === (r.rqd_classification === null)),
+    `${runsNow.filter((r) => r.rqd_classification === null).length} unclassified`);
+
+  // ---------- An undated run cannot be charted, so it cannot be saved ----------
+  // Every chart on the analytics page is keyed by date. A run saved without
+  // one still counted toward metres drilled but sat on no day, so the
+  // cumulative line ended below the total printed directly above it — the
+  // "total metres does not match the runs" mismatch, reproduced exactly.
+  console.log('\nA run must carry a date');
+  const undated = await call('POST', `/api/boreholes/${bh.id}/runs`, {
+    run_number: 9, depth_from: 18, depth_to: 19, drilling_time_min: 30,
+  });
+  check('a run with no date is refused', undated.status === 400 && /date is required/i.test(undated.data.error || ''),
+    undated.data && String(undated.data.error).slice(0, 70));
+
+  // ---------- Depths are only comparable within one hole ----------
+  // Merging every borehole's spans into one list made two holes that both
+  // start at surface overlap, so a second hole added almost no metres.
+  console.log('\nTwo holes are not merged into one');
+  const bh2 = (await call('POST', `/api/projects/${project.id}/boreholes`, {
+    code: 'WF-BH02', total_depth: 30, planned_depth: 30, status: 'In Progress',
+  })).data;
+  await call('POST', `/api/boreholes/${bh2.id}/runs`, {
+    run_number: 1, depth_from: 0, depth_to: 8, date: '2026-08-03', drilling_time_min: 120,
+  });
+  const proj = (await call('GET', `/api/analytics?project_id=${project.id}`)).data;
+  const projLast = proj.production.daily[proj.production.daily.length - 1];
+  check('a second hole from surface adds its full depth', near(proj.headline.total_metres, 26, 0.02),
+    `${proj.headline.total_metres} m — 18 m in BH01 + 8 m in BH02, not merged at surface`);
+  check('the project cumulative matches the project total', projLast && near(projLast.cumulative, proj.headline.total_metres, 0.02),
+    `headline ${proj.headline.total_metres} m vs chart ${projLast && projLast.cumulative} m`);
 
   await call('DELETE', `/api/projects/${project.id}`);
 

@@ -55,15 +55,34 @@ function toast(message, isError) {
 
 // ---------- Modal ----------
 
+// Set by openModal so its document-level Escape handler is removed with the
+// dialog; otherwise every opened form would leave a listener behind.
+let modalCleanup = null;
+
 function closeModal() {
+  if (modalCleanup) {
+    modalCleanup();
+    modalCleanup = null;
+  }
   modalRoot.innerHTML = '';
 }
 
+// Capture forms are long and are filled in on site, often one-handed. A stray
+// tap beside the dialog used to discard the lot, so the backdrop no longer
+// dismisses anything: closing is deliberate, via the X or Cancel. Escape is
+// kept, because losing the keyboard exit is its own accessibility problem,
+// but it asks first once anything has been typed.
 function openModal({ title, fieldsHtml, onSubmit, submitLabel }) {
+  // Opening a dialog while one is already up would otherwise orphan the
+  // previous Escape listener, which then fires against the live form.
+  if (modalCleanup) { modalCleanup(); modalCleanup = null; }
   modalRoot.innerHTML = `
     <div class="modal-backdrop">
-      <div class="modal">
-        <h3>${title}</h3>
+      <div class="modal" role="dialog" aria-modal="true" aria-label="${esc(String(title).replace(/<[^>]*>/g, ''))}">
+        <div class="modal-head">
+          <h3>${title}</h3>
+          <button type="button" class="modal-close" id="modal-close" aria-label="Close without saving" title="Close without saving">&times;</button>
+        </div>
         <form id="modal-form">
           <div class="form-grid">${fieldsHtml}</div>
           <div class="modal-actions">
@@ -74,16 +93,46 @@ function openModal({ title, fieldsHtml, onSubmit, submitLabel }) {
       </div>
     </div>
   `;
-  const backdrop = modalRoot.querySelector('.modal-backdrop');
   const form = modalRoot.querySelector('#modal-form');
-  modalRoot.querySelector('#modal-cancel').onclick = closeModal;
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) closeModal();
-  });
+
+  // Snapshot the form so "has anything been entered?" is a real comparison.
+  // Taken on the next frame, not now: every caller wires prefills, hidden
+  // fields and derived values AFTER openModal returns, so snapshotting here
+  // made every form dirty the instant it opened and prompted on every close.
+  let initial = null;
+  const snapshot = () => JSON.stringify([...new FormData(form).entries()]);
+  requestAnimationFrame(() => { initial = snapshot(); });
+  const isDirty = () => initial !== null && snapshot() !== initial;
+
+  const requestClose = () => {
+    if (isDirty() && !confirm('Discard this entry? Anything you have captured will be lost.')) return;
+    closeModal();
+  };
+
+  modalRoot.querySelector('#modal-cancel').onclick = requestClose;
+  modalRoot.querySelector('#modal-close').onclick = requestClose;
+
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    // Defer to a combobox only while its menu is actually open — otherwise
+    // Escape could never close the dialog from a focused lookup field.
+    const ae = document.activeElement;
+    if (ae && ae.classList.contains('lookup-input')) {
+      const menu = ae.closest('.lookup-control')?.querySelector('.lookup-menu');
+      if (menu && !menu.classList.contains('hidden')) return;
+    }
+    e.preventDefault();
+    requestClose();
+  };
+  document.addEventListener('keydown', onKey);
+  modalCleanup = () => document.removeEventListener('keydown', onKey);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const formData = new FormData(form);
     const data = Object.fromEntries(formData.entries());
+    // Transient controls exist only to drive another field (the RQD band
+    // picker writes through to rqd_pct) and must never reach the API.
+    form.querySelectorAll('[data-transient="1"]').forEach((el) => delete data[el.name]);
     for (const key in data) {
       if (data[key] === '') data[key] = null;
     }
@@ -155,13 +204,23 @@ function wireDepthContinuity(form, lastEnd) {
   const gapWrap = form.querySelector('#gap-reason-wrap');
   const gapInput = form.querySelector('textarea[name="skip_reason"]');
   if (!fromInput || !gapWrap) return;
+  const runType = form.querySelector('[name="run_type"]');
+  const label = form.querySelector('label[for], label');
   function update() {
+    // Casing is set from surface through ground already drilled, so it has no
+    // "continues from" depth and cannot leave a gap.
+    if (runType && runType.value === 'Casing') {
+      gapWrap.classList.add('hidden');
+      if (gapInput) gapInput.required = false;
+      return;
+    }
     const val = parseFloat(fromInput.value);
     const isGap = Number.isFinite(val) && val > lastEnd + 1e-9;
     gapWrap.classList.toggle('hidden', !isGap);
     if (gapInput) gapInput.required = isGap;
   }
   fromInput.addEventListener('input', update);
+  if (runType) runType.addEventListener('change', update);
   update();
 }
 
@@ -177,8 +236,10 @@ const RUN_FIELD_GROUPS = [
   {
     title: 'Shift & crew',
     fields: [
+      { name: 'run_type', label: 'Run Type', type: 'select', options: ['Drilling', 'Casing'], hint: 'Casing is set through ground already drilled, so it does not continue the hole' },
       { name: 'date', label: 'Date', type: 'date' },
       { name: 'shift', label: 'Shift', lookup: 'shift' },
+      // Active drilling time is worked out from these two, less downtime.
       { name: 'start_time', label: 'Start Time', type: 'time' },
       { name: 'end_time', label: 'End Time', type: 'time' },
       { name: 'rig_name', label: 'Drilling Rig', type: 'text', placeholder: 'e.g. Rig-07' },
@@ -199,10 +260,10 @@ const RUN_FIELD_GROUPS = [
     title: 'Recovery & rate',
     fields: [
       { name: 'core_recovered_m', label: 'Core Recovered (m)', type: 'number' },
-      // Active time only — delays are captured separately below, so the rate
-      // reflects how the ground drilled rather than how the shift ran.
-      { name: 'drilling_time_min', label: 'Active Drilling Time (min)', type: 'number', hint: 'Time actually cutting — exclude standing, breakdown and delay time' },
-      { name: 'rqd_pct', label: 'RQD (%)', type: 'number', hint: 'Classification is assigned automatically' },
+      // RQD can be measured or, where the core logger is working to the
+      // standard bands rather than a tape, picked. Either sets the other.
+      { name: 'rqd_pct', label: 'RQD (%)', type: 'number', hint: 'Enter a measured percentage, or pick the class beside it' },
+      { name: 'rqd_class_pick', label: 'RQD Classification', type: 'rqd-class', transient: true },
     ],
   },
   {
@@ -228,9 +289,29 @@ const RUN_FIELD_GROUPS = [
 function runFieldHtml(f, value) {
   if (f.lookup) return lookupSelectHtml(f.lookup, f.name, value, { label: f.label, full: f.full });
   const wrap = f.full ? 'full' : '';
-  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" />${
-    f.hint ? `<p class="field-hint">${esc(f.hint)}</p>` : ''
-  }</div>`;
+  const hint = f.hint ? `<p class="field-hint">${esc(f.hint)}</p>` : '';
+
+  // The RQD bands, pickable by name. `transient` keeps it out of the submitted
+  // payload — it writes through to rqd_pct instead, so the stored record has
+  // one number and never a class that disagrees with it.
+  if (f.type === 'rqd-class') {
+    return `<div class="${wrap}"><label>${esc(f.label)}</label>
+      <select name="${esc(f.name)}" data-transient="1">
+        <option value="">Not recorded</option>
+        ${DERIVE.RQD_BANDS.map(
+          (b) => `<option value="${esc(b.label)}">${esc(b.label)} (${b.min}–${b.max}%)</option>`
+        ).join('')}
+      </select>${hint}</div>`;
+  }
+
+  if (f.type === 'select') {
+    return `<div class="${wrap}"><label>${esc(f.label)}</label>
+      <select name="${esc(f.name)}">
+        ${(f.options || []).map((o) => `<option value="${esc(o)}" ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+      </select>${hint}</div>`;
+  }
+
+  return `<div class="${wrap}"><label>${esc(f.label)}</label><input type="${f.type}"${numStep(f.type)} name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(value ?? '')}" />${hint}</div>`;
 }
 
 // The block of values the system works out for itself. Shown read-only so the
@@ -246,6 +327,8 @@ function derivedPanelHtml(existing) {
       </div>
       <div class="derived-grid">
         <div class="derived-item"><span class="derived-label">Depth drilled</span><strong id="d-depth">&mdash;</strong></div>
+        <div class="derived-item"><span class="derived-label">Time on the clock</span><strong id="d-span">&mdash;</strong></div>
+        <div class="derived-item"><span class="derived-label">Active drilling time</span><strong id="d-active">&mdash;</strong></div>
         <div class="derived-item"><span class="derived-label">Penetration rate</span><strong id="d-rate">&mdash;</strong></div>
         <div class="derived-item"><span class="derived-label">Core recovery</span><strong id="d-recovery">&mdash;</strong></div>
         <div class="derived-item"><span class="derived-label">RQD classification</span><strong id="d-rqd">&mdash;</strong></div>
@@ -272,6 +355,7 @@ function runModalFieldsHtml(prefill, existing) {
     <div><label>Run Number</label><input type="number" step="1" name="run_number" value="${esc(runNo)}" /></div>
     <div class="item"><span class="label">Target depth</span>${prefill.target_depth ? `${prefill.target_depth} m` : '&mdash;'}</div>
     ${depthFieldsHtml(lastEnd, existing)}
+    <div class="full hidden" id="run-type-note"></div>
     <div class="full" id="run-validation"></div>
     ${derivedPanelHtml(existing)}
     ${RUN_FIELD_GROUPS.map(
@@ -334,30 +418,74 @@ function wireRunDerived(form) {
     recalc();
   });
 
+  // RQD can be measured or picked. Typing a percentage selects the band it
+  // falls in; picking a band writes its midpoint into the percentage. The
+  // midpoint, not a boundary, so a picked value cannot later be mistaken for
+  // a reading taken exactly at the edge of a class.
+  const rqdInput = get('rqd_pct');
+  const rqdPick = get('rqd_class_pick');
+  if (rqdPick) {
+    rqdPick.addEventListener('change', () => {
+      const band = DERIVE.rqdBand(rqdPick.value);
+      if (band) rqdInput.value = band.pick;
+      else rqdInput.value = '';
+      recalc();
+    });
+  }
+
   function recalc() {
     const from = get('depth_from')?.value;
     const to = get('depth_to')?.value;
-    const mins = get('drilling_time_min')?.value;
-    const core = parseFloat(get('core_recovered_m')?.value);
+    const core = DERIVE.blankToNull(get('core_recovered_m')?.value);
     const rqd = get('rqd_pct')?.value;
 
     const metres = DERIVE.depthDrilled(from, to);
     set('#d-depth', metres === null ? '—' : `${metres} m`);
 
+    // Active drilling time comes off the clock, less booked delays. Nothing to
+    // type: standing and breakdown time cannot leak into the rate.
+    const span = DERIVE.minutesBetween(get('start_time')?.value, get('end_time')?.value);
+    const active = DERIVE.activeDrillingMinutes(get('start_time')?.value, get('end_time')?.value, get('downtime_min')?.value);
+    const asHrs = (m) => (m === null ? '—' : `${Math.floor(m / 60)}h ${String(Math.round(m % 60)).padStart(2, '0')}m`);
+    set('#d-span', asHrs(span));
+    set('#d-active', active === null ? '— (enter start and end time)' : `${asHrs(active)} (${active} min)`,
+      active === 0 && span !== null ? 'is-overridden' : '');
+
     const overridden = !box.classList.contains('hidden') && get('penetration_rate_override')?.value;
-    const rate = overridden ? Number(get('penetration_rate_override').value) : DERIVE.penetrationRate(from, to, mins);
+    const rate = overridden ? Number(get('penetration_rate_override').value) : DERIVE.penetrationRate(from, to, active);
     set('#d-rate', rate === null || !Number.isFinite(rate) ? '—' : `${rate} m/h${overridden ? ' (adjusted)' : ''}`,
       overridden ? 'is-overridden' : '');
 
-    const recPct = metres && Number.isFinite(core) ? Number(((core / metres) * 100).toFixed(1)) : null;
+    const recPct = metres && core !== null ? Number(((core / metres) * 100).toFixed(1)) : null;
     set('#d-recovery', recPct === null ? '—' : `${recPct}%`);
 
     const cls = DERIVE.rqdClassification(rqd);
-    set('#d-rqd', cls || (rqd === '' || rqd === undefined ? '—' : 'Out of range'),
+    set('#d-rqd', cls || (DERIVE.blankToNull(rqd) === null ? 'Not recorded' : 'Out of range'),
       cls ? `rqd-badge rqd-${cls.toLowerCase().replace(/\s+/g, '-')}` : '');
+    // Keep the picker in step when the number is typed directly.
+    if (rqdPick && rqdPick.value !== (cls || '')) rqdPick.value = cls || '';
   }
 
+  // Casing does not advance the hole, so the fields that describe advancing it
+  // are not asked for.
+  const runTypeSel = get('run_type');
+  function applyRunType() {
+    const casing = runTypeSel && runTypeSel.value === 'Casing';
+    form.querySelectorAll('[data-advancing-only]').forEach((el) => el.classList.toggle('hidden', casing));
+    const note = form.querySelector('#run-type-note');
+    if (note) {
+      note.classList.toggle('hidden', !casing);
+      note.innerHTML = casing
+        ? '<div class="validation-msg is-ok">&#10003; Casing run — set through ground already drilled, so it does not continue from the last run and is left out of metres drilled.</div>'
+        : '';
+    }
+    recalc();
+  }
+  if (runTypeSel) runTypeSel.addEventListener('change', applyRunType);
+
   form.addEventListener('input', recalc);
+  form.addEventListener('lookup-change', recalc);
+  applyRunType();
   recalc();
 }
 
@@ -372,7 +500,16 @@ function wireRunValidation(form, targetDepth) {
     const to = parseFloat(get('depth_to')?.value);
     const core = parseFloat(get('core_recovered_m')?.value);
     const rqd = parseFloat(get('rqd_pct')?.value);
+    const casing = get('run_type') && get('run_type').value === 'Casing';
     const issues = [];
+    if (casing && Number.isFinite(from) && Number.isFinite(to) && to > from) {
+      // Overlapping drilled ground is the point of a casing run, so the only
+      // depth rule left is that it cannot be set past the bottom of the hole.
+      renderValidation(box, to > (targetDepth || Infinity) + 1e-9
+        ? [['error', `Casing to ${to} m is past the borehole target depth (${targetDepth} m)`]]
+        : []);
+      return;
+    }
     if (Number.isFinite(from) && Number.isFinite(to)) {
       if (to <= from) issues.push(['error', 'Depth To must be greater than Depth From']);
       const interval = to - from;
@@ -548,11 +685,14 @@ const TEST_TYPES = {
     ],
     compute(v) {
       const L = num(v.section_length_m);
+      // A stage counts only when BOTH readings were taken. A blank flow box
+      // used to coerce to 0 and average a fabricated 0-Lugeon stage into the
+      // result, dragging the reported permeability toward zero.
       const lugeons = [];
       for (let i = 1; i <= 5; i++) {
-        const p = num(v[`p${i}_bar`]);
-        const q = num(v[`q${i}_lpm`]);
-        if (p > 0 && q >= 0) lugeons.push(q / (L * (p / 10)));
+        const p = DERIVE.blankToNull(v[`p${i}_bar`]);
+        const q = DERIVE.blankToNull(v[`q${i}_lpm`]);
+        if (p !== null && q !== null && p > 0 && q >= 0) lugeons.push(q / (L * (p / 10)));
       }
       if (!(L > 0) || lugeons.length === 0) {
         return { value: null, unit: 'Lugeon', validity: 'Invalid — enter section length and at least one pressure/flow stage' };
@@ -563,9 +703,12 @@ const TEST_TYPES = {
   },
 };
 
+// A blank reading is "not taken", not zero. parseFloat('') is NaN and the
+// old fallback turned that into a real 0, which averaged a fabricated
+// 0-Lugeon stage into the stored Packer result.
 function num(v) {
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : 0;
+  const n = DERIVE.blankToNull(v);
+  return n === null ? 0 : n;
 }
 
 // Standard equipment/condition fields become searchable dropdowns over the
@@ -710,10 +853,13 @@ const SAMPLE_TYPES = {
       { name: 'rod_length_m', label: 'Rod Length (m)', type: 'number' },
       { name: 'sampler_diameter_mm', label: 'Sampler Diameter (mm)', type: 'number' },
       // Blow counts — the N-value inputs.
+      // The drive is 450 mm in three 150 mm increments, the first of which is
+      // the seating drive and is discarded. A separate seating field plus
+      // three more increments would describe a 600 mm drive, which is not the
+      // test — N was previously summed from the wrong two bands because of it.
       { name: 'seating_blows', label: 'Seating Blows (0–150 mm)', type: 'number' },
-      { name: 'blows_150_1', label: 'Blows — 1st 150 mm', type: 'number' },
-      { name: 'blows_150_2', label: 'Blows — 2nd 150 mm', type: 'number' },
-      { name: 'blows_150_3', label: 'Blows — 3rd 150 mm', type: 'number' },
+      { name: 'blows_150_300', label: '1st Blows (150–300 mm)', type: 'number' },
+      { name: 'blows_300_450', label: '2nd Blows (300–450 mm)', type: 'number' },
       { name: 'recovery_length_mm', label: 'Sample Recovery Length (mm)', type: 'number' },
       // Outcome and condition — standard terms.
       { name: 'refusal_status', label: 'Refusal Status', lookup: 'refusal_status' },
@@ -723,21 +869,33 @@ const SAMPLE_TYPES = {
       { name: 'remarks_standard', label: 'Remarks', lookup: 'standard_remarks', full: true },
       { name: 'disturbance_obstruction', label: 'Disturbance / Obstruction Encountered', type: 'textarea', full: true },
     ],
-    compute(v) {
-      const b2 = v.blows_150_2 === '' || v.blows_150_2 === undefined ? null : num(v.blows_150_2);
-      const b3 = v.blows_150_3 === '' || v.blows_150_3 === undefined ? null : num(v.blows_150_3);
-      // N is the 2nd + 3rd increments; the seating drive and 1st increment are
-      // excluded per ASTM D1586.
-      const nValue = b2 !== null && b3 !== null ? b2 + b3 : null;
-      const totalPen = num(v.penetration_length_mm);
-      const recoveryLen = num(v.recovery_length_mm);
-      const recoveryPct = totalPen > 0 && v.recovery_length_mm !== '' ? (recoveryLen / totalPen) * 100 : null;
+    compute(v, ctx) {
+      // N = blows over 150–300 mm plus blows over 300–450 mm. The seating
+      // drive (0–150) is discarded, per ASTM D1586.
+      const nValue = DERIVE.sptNValue(v.blows_150_300, v.blows_300_450);
+      // Penetration is not one of this form's own fields — it is the drive
+      // length captured in the SPT panel above, which also sets the depths.
+      // Reading it from `v` alone always yielded null, so recovery % could
+      // never be computed and the short-drive warning never fired.
+      const totalPen = DERIVE.blankToNull(
+        (ctx && ctx.penetration_achieved_mm) ?? v.penetration_length_mm ?? DERIVE.SPT_STANDARD_PENETRATION_MM
+      );
+      const recoveryLen = DERIVE.blankToNull(v.recovery_length_mm);
+      const recoveryPct = DERIVE.recoveryPct(recoveryLen, totalPen);
       const warnings = [];
       const isRefusal = !!v.refusal_status && v.refusal_status !== 'No Refusal';
-      [num(v.blows_150_1), b2 ?? 0, b3 ?? 0].forEach((b, i) => {
-        if (b >= 50 && !isRefusal) warnings.push(`Blow count ≥50 in increment ${i + 1} — consider recording a refusal status`);
+      [
+        ['seating drive', DERIVE.blankToNull(v.seating_blows)],
+        ['150–300 mm', DERIVE.blankToNull(v.blows_150_300)],
+        ['300–450 mm', DERIVE.blankToNull(v.blows_300_450)],
+      ].forEach(([band, b]) => {
+        if (b !== null && b >= 50 && !isRefusal) {
+          warnings.push(`${b} blows over the ${band} increment — at 50 or more the drive is normally recorded as refusal`);
+        }
       });
-      if (!isRefusal && totalPen > 0 && totalPen < 450) warnings.push('Incomplete penetration (<450 mm) — verify or record a refusal status');
+      if (!isRefusal && totalPen !== null && totalPen > 0 && totalPen < 450) {
+        warnings.push('Incomplete penetration (<450 mm) — verify or record a refusal status');
+      }
       if (recoveryPct !== null && recoveryPct > 100) warnings.push('Recovery exceeds penetration length — check the readings');
       return { nValue, recoveryPct, warnings, resultText: nValue !== null ? `N = ${nValue}` : null };
     },
@@ -876,7 +1034,10 @@ function wireSampleTypeCalc(form, sampleType) {
       values[f.name] = input ? input.value : '';
     });
     sampleDataInput.value = JSON.stringify(values);
-    const result = config.compute(values);
+    // The SPT drive length lives in the drive panel, not in this field list,
+    // so it is passed as context rather than being read out of `values`.
+    const ctx = { penetration_achieved_mm: form.querySelector('[name="penetration_achieved_mm"]')?.value };
+    const result = config.compute(values, ctx);
     nValueInput.value = result.nValue ?? '';
     recoveryInput.value = result.recoveryPct !== null ? result.recoveryPct.toFixed(1) : '';
 
@@ -1951,29 +2112,16 @@ async function renderDashboard() {
   const [stats, projects] = await Promise.all([api('GET', '/api/stats'), api('GET', '/api/projects')]);
   const recent = projects.slice(0, 5);
 
-  const segments = [
-    { color: 'var(--green)', label: 'Complete', value: stats.boreholes_complete },
-    { color: 'var(--blue)', label: 'In Progress', value: stats.boreholes_in_progress },
-    { color: 'var(--amber)', label: 'Planned', value: stats.boreholes_planned },
-  ];
-  const accounted = segments.reduce((sum, s) => sum + s.value, 0);
-  const other = stats.total_boreholes - accounted;
-  if (other > 0) segments.push({ color: '#d7dbd8', label: 'Other', value: other });
 
-  let ringCss = '#e9ebe8';
-  let pct = 0;
-  if (stats.total_boreholes > 0) {
-    let cursor = 0;
-    const stops = [];
-    segments.forEach((s) => {
-      const start = cursor;
-      const end = cursor + (s.value / stats.total_boreholes) * 100;
-      stops.push(`${s.color} ${start}% ${end}%`);
-      cursor = end;
-    });
-    ringCss = stops.join(', ');
-    pct = Math.round((stats.boreholes_complete / stats.total_boreholes) * 100);
-  }
+  // The ring shows metres drilled against metres targeted, so a hole at 18 of
+  // 25 m counts as most of a hole rather than as nothing until its status is
+  // flipped to Complete.
+  const prog = stats.progress || { pct: null, drilled_m: 0, target_m: 0, holes: [], holes_without_target: 0 };
+  const pct = prog.pct === null ? 0 : Math.round(prog.pct);
+  const ringCss =
+    prog.pct === null
+      ? 'var(--border) 0% 100%'
+      : `var(--accent) 0% ${prog.pct}%, var(--border) ${prog.pct}% 100%`;
 
   appEl.innerHTML = `
     <div class="page-header">
@@ -2039,15 +2187,26 @@ async function renderDashboard() {
         <div class="ring-wrap">
           <div class="ring" style="background: conic-gradient(${ringCss})">
             <div class="ring-center">
-              <span class="ring-value">${pct}%</span>
-              <span class="ring-label">Complete</span>
+              <span class="ring-value">${prog.pct === null ? '—' : `${pct}%`}</span>
+              <span class="ring-label">of target depth</span>
             </div>
           </div>
-          <div class="ring-legend">
-            ${segments
-              .filter((s) => s.value > 0)
-              .map((s) => `<span><span class="dot" style="background:${s.color}"></span>${s.label} (${s.value})</span>`)
-              .join('')}
+          <p class="ring-caption">${
+            prog.pct === null
+              ? 'Set a planned or total depth on a borehole to track progress.'
+              : `${prog.drilled_m} m drilled of ${prog.target_m} m across ${prog.holes_with_target} borehole${prog.holes_with_target === 1 ? '' : 's'}`
+          }${prog.holes_without_target ? ` &middot; ${prog.holes_without_target} without a target depth` : ''}</p>
+          <div class="hole-progress-list">
+            ${(prog.holes || [])
+              .filter((h) => h.pct !== null)
+              .map(
+                (h) => `<a class="hole-progress" href="#/boreholes/${h.borehole_id}">
+                  <span class="hole-progress-code">${esc(h.code)}</span>
+                  <span class="hole-progress-track"><span class="hole-progress-fill" style="width:${Math.min(100, h.pct)}%"></span></span>
+                  <span class="hole-progress-pct">${Math.round(h.pct)}%</span>
+                </a>`
+              )
+              .join('') || '<span class="ring-legend">No boreholes with a target depth yet.</span>'}
           </div>
         </div>
       </div>
@@ -2295,6 +2454,20 @@ async function renderProjectDetail(id) {
 
 // ---------- Site map ----------
 
+// Boreholes are stored as easting/northing, but the field means different
+// things on different jobs: decimal degrees on a GPS handset, metres in a
+// projected grid (UTM, Hartebeesthoek LO) on a survey drawing. Only degrees
+// can be put on a web map, so the numbers are inspected rather than assumed —
+// plotting projected metres as lat/lon would place the site in the ocean off
+// West Africa without any visible error.
+function coordinateMode(points) {
+  const lons = points.map((p) => Number(p.easting));
+  const lats = points.map((p) => Number(p.northing));
+  const plausible = lons.every((v) => Number.isFinite(v) && v >= -180 && v <= 180)
+    && lats.every((v) => Number.isFinite(v) && v >= -90 && v <= 90);
+  return plausible ? 'degrees' : 'projected';
+}
+
 function renderSiteMap(container, boreholes) {
   const points = boreholes.filter((b) => b.easting !== null && b.easting !== '' && b.northing !== null && b.northing !== '');
   if (points.length === 0) {
@@ -2302,6 +2475,83 @@ function renderSiteMap(container, boreholes) {
     return;
   }
 
+  if (coordinateMode(points) === 'degrees' && typeof L !== 'undefined') {
+    return renderLeafletMap(container, points);
+  }
+  // Projected coordinates, or the map library unavailable: fall back to the
+  // relative-position plot, which is still a true picture of the layout.
+  renderSchematicMap(container, points, coordinateMode(points) === 'projected');
+}
+
+// A real basemap. Tiles need the network; on a site without signal Leaflet
+// still renders the markers, the scale and the interaction over an empty
+// canvas, so the layout remains readable — it just has no imagery behind it.
+function renderLeafletMap(container, points) {
+  container.innerHTML = `
+    <div class="site-map-shell">
+      <div id="site-map-canvas" class="site-map-canvas"></div>
+      <div class="site-map-legend">
+        ${Object.entries(BOREHOLE_STATUS_COLOR)
+          .map(([label, c]) => `<span><span class="dot" style="background:${c}"></span>${esc(label)}</span>`)
+          .join('')}
+        <span class="site-map-offline hidden" id="site-map-offline">&#9888; Basemap tiles unavailable offline — markers still shown</span>
+      </div>
+    </div>`;
+
+  // Tear down any previous instance first: the router replaces appEl wholesale,
+  // so a map left behind keeps its listeners and a pending invalidateSize
+  // pointed at a container that is no longer in the document.
+  if (activeSiteMap) { try { activeSiteMap.remove(); } catch (_) {} activeSiteMap = null; }
+  const map = L.map('site-map-canvas', { scrollWheelZoom: false });
+  activeSiteMap = map;
+  const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    // OpenStreetMap's licence requires visible attribution.
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+  });
+  let tileFailures = 0;
+  tiles.on('tileerror', () => {
+    if (++tileFailures === 3) document.getElementById('site-map-offline')?.classList.remove('hidden');
+  });
+  tiles.addTo(map);
+  L.control.scale({ imperial: false }).addTo(map);
+
+  const markers = points.map((p) => {
+    const color = BOREHOLE_STATUS_COLOR[p.status] || BOREHOLE_STATUS_COLOR.Planned;
+    const m = L.circleMarker([Number(p.northing), Number(p.easting)], {
+      radius: 9, color: '#04141f', weight: 2, fillColor: color, fillOpacity: 0.95,
+    }).addTo(map);
+    m.bindTooltip(p.code, { permanent: true, direction: 'right', className: 'site-map-label' });
+    m.bindPopup(
+      `<strong>${esc(p.code)}</strong><br/>${esc(p.status || 'Planned')}` +
+      `${p.total_depth ? `<br/>${p.total_depth} m` : ''}` +
+      `<br/><a href="#/boreholes/${p.id}">Open borehole</a>`
+    );
+    return m;
+  });
+
+  const group = L.featureGroup(markers);
+  // A single borehole has no extent to fit, so give it a sensible site-scale zoom.
+  if (points.length === 1) map.setView(group.getBounds().getCenter(), 16);
+  else map.fitBounds(group.getBounds(), { padding: [36, 36] });
+
+  // The container is laid out after this runs in some paths; Leaflet needs a
+  // nudge or it renders into a zero-height box. Guard on the map still being
+  // the live one, since navigating away destroys it before this fires.
+  setTimeout(() => { if (activeSiteMap === map && map.getContainer().isConnected) map.invalidateSize(); }, 60);
+}
+
+// The one live map instance, so it can be disposed before another is built.
+let activeSiteMap = null;
+
+const BOREHOLE_STATUS_COLOR = {
+  Complete: '#2ec27e',
+  'In Progress': '#5aa9f5',
+  Planned: '#e0a020',
+  Abandoned: '#f06a5e',
+};
+
+function renderSchematicMap(container, points, projected) {
   const W = 760;
   const H = 380;
   const pad = 40;
@@ -2317,13 +2567,13 @@ function renderSiteMap(container, boreholes) {
   const scaleX = (x) => pad + ((x - minX) / spanX) * (W - pad * 2);
   const scaleY = (y) => H - pad - ((y - minY) / spanY) * (H - pad * 2);
 
-  const statusColor = { Complete: 'var(--green)', 'In Progress': 'var(--blue)', Planned: 'var(--amber)', Abandoned: 'var(--red)' };
+  const statusColor = BOREHOLE_STATUS_COLOR;
 
   const pointsHtml = points
     .map((p) => {
       const cx = points.length === 1 ? W / 2 : scaleX(Number(p.easting));
       const cy = points.length === 1 ? H / 2 : scaleY(Number(p.northing));
-      const color = statusColor[p.status] || 'var(--green)';
+      const color = statusColor[p.status] || statusColor.Planned;
       return `
       <g class="site-map-point" data-id="${p.id}">
         <circle cx="${cx}" cy="${cy}" r="9" style="fill:${color}"></circle>
@@ -2334,6 +2584,9 @@ function renderSiteMap(container, boreholes) {
 
   container.innerHTML = `
     <div class="site-map-wrap">
+      ${projected
+        ? `<p class="field-hint" style="margin:0 0 8px;">Coordinates look like projected grid metres rather than latitude/longitude, so they are shown as relative positions. Capture decimal degrees to place these on a basemap.</p>`
+        : ''}
       <svg viewBox="0 0 ${W} ${H}" width="100%" height="380" class="site-map-grid">
         <line x1="${pad}" y1="${H - pad}" x2="${W - pad}" y2="${H - pad}" />
         <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${H - pad}" />
@@ -2467,8 +2720,10 @@ function boreholeProgressHtml(a, borehole) {
                 ${lineChart([{ label: 'RQD', points: rqd.map((p) => ({ x: p.x, y: p.y })) }], {
                   unit: '%',
                   xLabel: 'Depth (m)',
+                  xNumeric: true,
                   xFormat: (v) => `${v} m`,
                   ariaLabel: 'Rock quality designation against depth',
+                  footnote: 'Only runs with a recorded RQD are plotted.',
                 })}</div>`
             : ''
         }

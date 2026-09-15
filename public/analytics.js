@@ -27,6 +27,27 @@ function analyticsQuery() {
   return params.toString();
 }
 
+// RQD readings from different holes are different profiles. Drawing them as
+// one line makes it jump between boreholes as the depth happens to sort,
+// which reads as wild variation within a single hole. One line per borehole,
+// capped at the palette's slot count so hues are never cycled.
+function rqdSeriesByBorehole(points) {
+  const byHole = new Map();
+  for (const p of points || []) {
+    const hole = (p.meta && p.meta.borehole) || 'Borehole';
+    if (!byHole.has(hole)) byHole.set(hole, []);
+    byHole.get(hole).push({ x: p.x, y: p.y });
+  }
+  const holes = [...byHole.entries()]
+    .map(([label, pts]) => ({ label, points: pts.sort((a, b) => a.x - b.x) }))
+    .sort((a, b) => b.points.length - a.points.length);
+  const MAX = 8;
+  if (holes.length <= MAX) return holes;
+  const kept = holes.slice(0, MAX - 1);
+  kept.push({ label: `Other (${holes.length - MAX + 1} holes)`, points: holes.slice(MAX - 1).flatMap((h) => h.points).sort((a, b) => a.x - b.x) });
+  return kept;
+}
+
 function filterSelect(name, label, options, selected, valueKey, labelKey) {
   return `<div class="filter-item">
     <label>${esc(label)}</label>
@@ -84,10 +105,24 @@ async function renderAnalyticsPage() {
       <span class="hero-label">Total metres drilled</span>
       <span class="hero-value">${h.total_metres ?? 0}<span class="hero-unit"> m</span></span>
       <span class="hero-sub">${h.total_runs} run(s) across ${h.drilling_days} drilling day(s)${
+        h.casing_runs ? ` &middot; ${h.casing_runs} casing run(s), not counted as metres` : ''
+      }${
         pva.variance !== null && pva.variance !== undefined
           ? ` &middot; <strong class="${pva.on_track ? 'delta-good' : 'delta-bad'}">${pva.variance >= 0 ? '+' : ''}${pva.variance} m vs plan</strong>`
           : ''
       }</span>
+      <!-- What the headline figure is actually counting. Without this the
+           number silently changes definition when a crew filter is applied. -->
+      <span class="hero-basis">${esc(h.advance_basis)}${
+        h.sampler_advanced_metres ? ` &middot; ${h.run_metres} m cut by the bit + ${h.sampler_advanced_metres} m advanced by samplers` : ''
+      }</span>
+      <!-- The only legitimate reason the cumulative line can end below this
+           number. Stated outright so the difference is never left unexplained. -->
+      ${
+        h.undated_metres
+          ? `<span class="hero-basis hero-warn">${h.undated_metres} m on ${h.undated_records} undated record(s) — counted in this total but absent from every dated chart. Add a date to reconcile.</span>`
+          : ''
+      }
     </div>
 
     <div class="stat-row">
@@ -255,11 +290,13 @@ async function renderAnalyticsPage() {
       ${
         a.groundConditions.rqd.length
           ? `<div class="chart-card chart-card-wide"><h3>RQD with depth</h3>
-              ${lineChart([{ label: 'RQD', points: a.groundConditions.rqd.map((p) => ({ x: p.x, y: p.y })) }], {
+              ${lineChart(rqdSeriesByBorehole(a.groundConditions.rqd), {
                 unit: '%',
                 xLabel: 'Depth (m)',
+                xNumeric: true,
                 xFormat: (v) => `${v} m`,
-                ariaLabel: 'Rock quality designation against depth',
+                ariaLabel: 'Rock quality designation against depth, one line per borehole',
+                footnote: 'RQD is only plotted where it was recorded; runs with no RQD are omitted rather than shown as zero.',
               })}</div>`
           : ''
       }

@@ -131,7 +131,8 @@ async function seedBorehole(projectId, spec) {
       core_recovered_m: round(advance * recoveryFactor),
       rqd_pct: isRock ? round(45 + (runNo % 5) * 9, 1) : null,
       penetration_rate_m_hr: round(rate, 2),
-      drilling_time_min: Math.round((advance / rate) * 60),
+      // Active drilling time is derived from the clock times and downtime,
+      // so it is deliberately not sent.
       downtime_min: downtime,
       downtime_reason: downtime ? (runNo % 7 === 0 ? 'Equipment Breakdown' : 'Rig Move / Setup') : 'None',
       water_loss_pct: isRock ? round(10 + (runNo % 4) * 6, 1) : null,
@@ -192,8 +193,9 @@ async function seedBorehole(projectId, spec) {
     if (type === 'SPT') {
       // Blow counts rise with depth; N is derived server-side from these.
       const base = 3 + Math.floor(sampleFrom * 0.9);
-      const b1 = base, b2 = base + 2, b3 = base + 4;
-      body.spt_n_value = b2 + b3;
+      const b1 = base, b2 = base + 2;
+      // N is the two increments after the seating drive (ASTM D1586).
+      body.spt_n_value = b1 + b2;
       body.recovery_pct = round((330 / 450) * 100, 1);
       body.sample_data = {
         sampler_type: 'Standard Split Spoon (51 mm OD)',
@@ -203,9 +205,8 @@ async function seedBorehole(projectId, spec) {
         rod_length_m: round(sampleFrom + 1.5, 2),
         sampler_diameter_mm: 51,
         seating_blows: 2,
-        blows_150_1: b1,
-        blows_150_2: b2,
-        blows_150_3: b3,
+        blows_150_300: b1,
+        blows_300_450: b2,
         penetration_length_mm: 450,
         recovery_length_mm: 330,
         refusal_status: 'No Refusal',
