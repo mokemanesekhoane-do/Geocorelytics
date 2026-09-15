@@ -126,6 +126,22 @@ function openModal({ title, fieldsHtml, onSubmit, submitLabel }) {
   };
   document.addEventListener('keydown', onKey);
   modalCleanup = () => document.removeEventListener('keydown', onKey);
+
+  // Last line of defence against a silent dead Save button. If a control is
+  // required but not rendered, the browser cancels submit and reports it only
+  // to the console — the user sees a button that does nothing. Conditional
+  // fields go through gateField() so this should never fire; if it ever does,
+  // the stale requirement is dropped and the reason is surfaced rather than
+  // swallowed.
+  form.addEventListener('invalid', (e) => {
+    const el = e.target;
+    if (el && el.required && el.offsetParent === null && !el.disabled) {
+      el.required = false;
+      console.warn(`Dropped a required flag on a hidden control: ${el.name || el.id}`);
+      requestAnimationFrame(() => form.requestSubmit());
+    }
+  }, true);
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const formData = new FormData(form);
@@ -182,42 +198,81 @@ function lastEndDepth(rows) {
   return rows.length ? Math.max(...rows.map((r) => r.depth_to)) : 0;
 }
 
-function depthFieldsHtml(lastEnd, existing) {
+// Shows or hides a conditional control. A `required` field inside a
+// display:none wrapper is unreachable, and the browser then refuses to submit
+// the form with only a console line — no bubble, no message, a dead button. So
+// visibility, `required` and `disabled` are always set together, and a hidden
+// control is cleared and taken out of the submitted data entirely.
+// `detach` also takes the control out of the submitted data and clears it —
+// use it where a stale value would be wrong for the new state (SPT drive
+// fields on a Shelby sample). Leave it off where the value is still the
+// record's own and merely not being asked about right now.
+function gateField(wrap, control, on, opts) {
+  if (wrap) wrap.classList.toggle('hidden', !on);
+  if (!control) return;
+  control.required = !!on;
+  if (opts && opts.detach) {
+    control.disabled = !on;
+    if (!on) control.value = '';
+  }
+}
+
+// Two different depth rules exist in this app, and conflating them is what made
+// a perfectly ordinary Shelby sample unsavable:
+//
+//   'continuous' — a stratigraphy log or a drilling run. The record describes
+//                  the hole itself, so it must continue from the last one, and
+//                  a jump is a skipped interval that needs a reason.
+//   'interval'   — a sample or an in-situ test. These are taken AT INTERVALS.
+//                  The ground between two samples is accounted for by the
+//                  drilling runs, not by the next sample, so being
+//                  non-contiguous is normal and carries no obligation at all.
+//                  The only real rule is the server's: start inside a drilled
+//                  run, or exactly at the bottom of the hole where the sampler
+//                  is driven ahead of the bit. wireIntervalValidation checks
+//                  precisely that, live, so the gate is simply absent here.
+function depthFieldsHtml(lastEnd, existing, opts) {
   existing = existing || {};
+  const mode = (opts && opts.mode) || 'continuous';
+  const hint =
+    mode === 'interval'
+      ? `hole bottom is ${lastEnd} m`
+      : `continues from ${lastEnd} m`;
   return `
     <div>
-      <label>Depth From (m) * <span style="font-weight:400;color:var(--text-dim);">continues from ${lastEnd} m</span></label>
+      <label>Depth From (m) * <span style="font-weight:400;color:var(--text-dim);">${esc(hint)}</span></label>
       <input type="number" step="any" name="depth_from" required value="${esc(existing.depth_from ?? lastEnd)}" />
     </div>
     <div><label>Depth To (m) *</label><input type="number" step="any" name="depth_to" required value="${esc(existing.depth_to ?? '')}" /></div>
-    <div class="full hidden" id="gap-reason-wrap">
+    ${
+      mode === 'interval'
+        ? ''
+        : `<div class="full hidden" id="gap-reason-wrap">
       <label>Reason for Skipped Interval *</label>
       <textarea name="skip_reason" placeholder="e.g. No recovery between 4.0-4.5 m, core loss">${esc(existing.skip_reason || '')}</textarea>
-    </div>
+    </div>`
+    }
   `;
 }
 
-// Wires the live gap-reason toggle onto a form built with depthFieldsHtml.
-// Call after openModal() so the returned form element is in the DOM.
+// Wires the live gap-reason toggle onto a form built with depthFieldsHtml in
+// 'continuous' mode. Forms built in 'interval' mode have no gate to wire.
 function wireDepthContinuity(form, lastEnd) {
   const fromInput = form.querySelector('input[name="depth_from"]');
   const gapWrap = form.querySelector('#gap-reason-wrap');
   const gapInput = form.querySelector('textarea[name="skip_reason"]');
   if (!fromInput || !gapWrap) return;
   const runType = form.querySelector('[name="run_type"]');
-  const label = form.querySelector('label[for], label');
   function update() {
     // Casing is set from surface through ground already drilled, so it has no
     // "continues from" depth and cannot leave a gap.
     if (runType && runType.value === 'Casing') {
-      gapWrap.classList.add('hidden');
-      if (gapInput) gapInput.required = false;
+      gateField(gapWrap, gapInput, false);
       return;
     }
     const val = parseFloat(fromInput.value);
     const isGap = Number.isFinite(val) && val > lastEnd + 1e-9;
-    gapWrap.classList.toggle('hidden', !isGap);
-    if (gapInput) gapInput.required = isGap;
+    gateField(gapWrap, gapInput, isGap);
   }
   fromInput.addEventListener('input', update);
   if (runType) runType.addEventListener('change', update);
@@ -349,7 +404,9 @@ function derivedPanelHtml(existing) {
 function runModalFieldsHtml(prefill, existing) {
   existing = existing || {};
   const val = (name) => existing[name] ?? prefill.defaults?.[name] ?? '';
-  const lastEnd = existing.depth_from ?? prefill.depth_from ?? 0;
+  // The baseline is where the rest of the hole ends, never this run's own start
+  // depth. depthFieldsHtml still prefills the field with the stored value.
+  const lastEnd = prefill.depth_from ?? 0;
   const runNo = existing.run_number ?? prefill.run_number;
   return `
     <div><label>Run Number</label><input type="number" step="1" name="run_number" value="${esc(runNo)}" /></div>
@@ -366,10 +423,16 @@ function runModalFieldsHtml(prefill, existing) {
 }
 
 async function openRunModal(boreholeId, existing, onSaved) {
-  const prefill = existing
-    ? { depth_from: existing.depth_from, run_number: existing.run_number, target_depth: null, defaults: {} }
-    : await api('GET', `/api/boreholes/${boreholeId}/next-run`);
-  const lastEnd = existing ? existing.depth_from : prefill.depth_from;
+  // Edit asks the server the same question Add does, excluding this run — a
+  // run cannot be its own baseline. Using its current depth_from meant simply
+  // correcting a start depth demanded a "skipped interval" reason, and the
+  // edit form had no target depth to validate against either.
+  const ctx = await api(
+    'GET',
+    `/api/boreholes/${boreholeId}/next-run${existing ? `?exclude_run=${existing.id}` : ''}`
+  );
+  const prefill = existing ? { ...ctx, run_number: existing.run_number } : ctx;
+  const lastEnd = prefill.depth_from;
   const form = openModal({
     title: existing ? `Edit Drilling Run ${existing.run_number ?? ''}` : `New Drilling Run ${prefill.run_number}`,
     submitLabel: existing ? 'Save Run' : 'Log Run',
@@ -469,9 +532,11 @@ function wireRunDerived(form) {
   // Casing does not advance the hole, so the fields that describe advancing it
   // are not asked for.
   const runTypeSel = get('run_type');
+  // Remembered so switching back to Drilling restores the depth the form was
+  // opened with, rather than leaving the casing default behind.
+  const drillingFrom = get('depth_from') ? get('depth_from').value : '';
   function applyRunType() {
     const casing = runTypeSel && runTypeSel.value === 'Casing';
-    form.querySelectorAll('[data-advancing-only]').forEach((el) => el.classList.toggle('hidden', casing));
     const note = form.querySelector('#run-type-note');
     if (note) {
       note.classList.toggle('hidden', !casing);
@@ -479,9 +544,19 @@ function wireRunDerived(form) {
         ? '<div class="validation-msg is-ok">&#10003; Casing run — set through ground already drilled, so it does not continue from the last run and is left out of metres drilled.</div>'
         : '';
     }
+    // Casing is set from surface down through ground already cut, and the
+    // server refuses it past the hole bottom. Leaving Depth From prefilled at
+    // the bottom made every Depth To the server would accept impossible to
+    // enter, so the form could not be completed at all.
+    const fromInput = get('depth_from');
+    if (fromInput && !fromInput.dataset.touched) {
+      fromInput.value = casing ? 0 : drillingFrom;
+    }
     recalc();
   }
   if (runTypeSel) runTypeSel.addEventListener('change', applyRunType);
+  const fromInput = get('depth_from');
+  if (fromInput) fromInput.addEventListener('input', () => { fromInput.dataset.touched = '1'; });
 
   form.addEventListener('input', recalc);
   form.addEventListener('lookup-change', recalc);
@@ -793,7 +868,7 @@ function testModalFieldsHtml(lastEnd, existing) {
       </select>
     </div>
     <div><label>Borehole / Test-Hole Reference</label><input name="test_ref" value="${esc(existing.test_ref || '')}" /></div>
-    ${depthFieldsHtml(lastEnd, existing)}
+    ${depthFieldsHtml(lastEnd, existing, { mode: 'interval' })}
     <div class="full" id="interval-validation"></div>
     <div><label>Date</label><input type="date" name="date" value="${esc(existing.date || todayStr())}" /></div>
     <div><label>Operator Name</label><input name="conducted_by" value="${esc(existing.conducted_by || '')}" /></div>
@@ -812,15 +887,28 @@ function testModalFieldsHtml(lastEnd, existing) {
   `;
 }
 
-function wireTestModal(form, lastEnd, context) {
+function wireTestModal(form, lastEnd, context, existing) {
   wireDepthContinuity(form, lastEnd);
   wireLookups(form);
   const typeSelect = form.querySelector('#test-type-select');
   const fieldsContainer = form.querySelector('#test-type-fields');
+
+  // Readings cached per type, for the same reason as the sample modal: a type
+  // change that was immediately undone must not silently empty the record.
+  const cache = {};
+  let currentType = typeSelect.value;
+  if (existing && existing.test_type) cache[existing.test_type] = existing.test_data || {};
+
   function rebuild() {
-    fieldsContainer.innerHTML = testTypeFieldsHtml(typeSelect.value, {});
+    const values = {};
+    fieldsContainer.querySelectorAll('[name^="tf_"]').forEach((el) => {
+      values[el.name.slice(3)] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    cache[currentType] = values;
+    currentType = typeSelect.value;
+    fieldsContainer.innerHTML = testTypeFieldsHtml(currentType, cache[currentType] || {});
     wireLookups(form);
-    wireTestTypeCalc(form, typeSelect.value);
+    wireTestTypeCalc(form, currentType);
   }
   typeSelect.addEventListener('change', rebuild);
   wireTestTypeCalc(form, typeSelect.value);
@@ -1113,7 +1201,7 @@ function sampleModalFieldsHtml(lastEnd, existing) {
         </div>
       </div>
     </div>
-    ${depthFieldsHtml(lastEnd, existing)}
+    ${depthFieldsHtml(lastEnd, existing, { mode: 'interval' })}
     <div class="full" id="interval-validation"></div>
     <div class="full" id="sample-type-fields-wrap">
       <div class="form-grid" id="sample-type-fields">${sampleTypeFieldsHtml(sampleType, existingData)}</div>
@@ -1174,13 +1262,21 @@ function wireSptDrive(form, context) {
     toInput.readOnly = isSpt;
     fromInput.classList.toggle('is-derived', isSpt && !unlocked);
     toInput.classList.toggle('is-derived', isSpt);
-    if (!isSpt) return;
+    if (!isSpt) {
+      // The whole drive panel belongs to SPT. Hiding it while leaving the
+      // reason still `required` made Save do nothing at all — the browser
+      // refuses to submit a form whose invalid control cannot be focused, and
+      // says so only in the console. Detaching also stops a leftover
+      // penetration figure being stored against a Shelby or UDS sample.
+      gateField(shortWrap, shortSelect, false, { detach: true });
+      if (penInput) penInput.disabled = true;
+      return;
+    }
+    if (penInput) penInput.disabled = false;
 
     const pen = Number(penInput.value);
     const short = Number.isFinite(pen) && pen > 0 && pen < DERIVE.SPT_STANDARD_PENETRATION_MM;
-    shortWrap.classList.toggle('hidden', !short);
-    shortSelect.required = short;
-    if (!short) shortSelect.value = '';
+    gateField(shortWrap, shortSelect, short, { detach: true });
 
     const interval = DERIVE.sptInterval(fromInput.value, pen);
     if (interval) {
@@ -1200,15 +1296,34 @@ function wireSptDrive(form, context) {
   apply();
 }
 
-function wireSampleModal(form, lastEnd, context) {
+function wireSampleModal(form, lastEnd, context, existing) {
   wireDepthContinuity(form, lastEnd);
   wireLookups(form);
   const typeSelect = form.querySelector('#sample-type-select');
   const fieldsContainer = form.querySelector('#sample-type-fields');
+
+  // Readings are kept per type. Rebuilding with a blank object meant a single
+  // misclick on the type select — even one immediately undone — silently
+  // emptied every reading, the derived N-value and the recovery, and those
+  // blanks were what got saved.
+  const cache = {};
+  let currentType = typeSelect.value;
+  if (existing && existing.sample_type) cache[existing.sample_type] = existing.sample_data || {};
+
+  const snapshotCurrent = () => {
+    const values = {};
+    fieldsContainer.querySelectorAll('[name^="sf_"]').forEach((el) => {
+      values[el.name.slice(3)] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    cache[currentType] = values;
+  };
+
   function rebuild() {
-    fieldsContainer.innerHTML = sampleTypeFieldsHtml(typeSelect.value, {});
+    snapshotCurrent();
+    currentType = typeSelect.value;
+    fieldsContainer.innerHTML = sampleTypeFieldsHtml(currentType, cache[currentType] || {});
     wireLookups(form);
-    wireSampleTypeCalc(form, typeSelect.value);
+    wireSampleTypeCalc(form, currentType);
   }
   typeSelect.addEventListener('change', rebuild);
   wireSampleTypeCalc(form, typeSelect.value);
@@ -3097,10 +3212,14 @@ async function renderBoreholeDetail(id) {
   });
 
   appEl.querySelectorAll('[data-edit-sample]').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const sample = samples.find((s) => s.id === Number(btn.dataset.editSample));
-      const otherSamples = samples.filter((s) => s.id !== sample.id);
-      const lastEnd = lastEndDepth(otherSamples);
+      // The same context the Add form uses, minus this record's own contribution
+      // to the hole bottom. Deriving it locally from the other samples was the
+      // bug: it ignored drilling runs entirely, so a sample taken at a normal
+      // interval below the previous one looked like a skipped stretch.
+      const ctx = await api('GET', `/api/boreholes/${id}/next-interval?kind=sample&exclude_sample=${sample.id}`);
+      const lastEnd = ctx.hole_bottom;
       const form = openModal({
         title: 'Edit Sample',
         submitLabel: 'Save Changes',
@@ -3113,7 +3232,7 @@ async function renderBoreholeDetail(id) {
           renderBoreholeDetail(id);
         },
       });
-      wireSampleModal(form, lastEnd);
+      wireSampleModal(form, lastEnd, ctx, sample);
       const modalEl = form.closest('.modal');
       const attachSection = document.createElement('div');
       attachSection.style.marginTop = '18px';
@@ -3155,10 +3274,12 @@ async function renderBoreholeDetail(id) {
   });
 
   appEl.querySelectorAll('[data-edit-test]').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const test = tests.find((t) => t.id === Number(btn.dataset.editTest));
-      const otherTests = tests.filter((t) => t.id !== test.id);
-      const lastEnd = lastEndDepth(otherTests);
+      // Same fix as Edit Sample: an in-situ test is run at an interval, not
+      // in a chain with the previous test.
+      const ctx = await api('GET', `/api/boreholes/${id}/next-interval?kind=test&exclude_test=${test.id}`);
+      const lastEnd = ctx.hole_bottom;
       const form = openModal({
         title: 'Edit In-situ Test',
         submitLabel: 'Save Changes',
@@ -3171,7 +3292,7 @@ async function renderBoreholeDetail(id) {
           renderBoreholeDetail(id);
         },
       });
-      wireTestModal(form, lastEnd);
+      wireTestModal(form, lastEnd, ctx, test);
       const modalEl = form.closest('.modal');
       const attachSection = document.createElement('div');
       attachSection.style.marginTop = '18px';

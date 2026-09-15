@@ -97,7 +97,15 @@ function getProjectIdForTest(testId) {
 // ended unless a skip_reason justifies the gap. Returns an error string, or
 // null if the interval is valid. `existingRows` must be the other entries
 // already recorded for this borehole (excluding the row being edited, if any).
-function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows, gapIsDrilled }) {
+// `contiguous` says whether this record type is a chain. A drilling run or a
+// stratigraphy log describes the hole itself and must continue from the last
+// one. A sample or an in-situ test is taken AT AN INTERVAL — the ground
+// between two samples is accounted for by the drilling runs, not by the next
+// sample — so for those the only interval rules are "not reversed" and "no
+// overlap"; whether the ground was drilled is validateAgainstBorehole's
+// question, and it words the answer in terms of the hole bottom rather than
+// naming the previous sample as something to continue from.
+function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows, gapIsDrilled, contiguous = true }) {
   const from = Number(depthFrom);
   const to = Number(depthTo);
   if (!Number.isFinite(from) || !Number.isFinite(to)) {
@@ -111,7 +119,7 @@ function validateDepthInterval({ depthFrom, depthTo, skipReason, existingRows, g
       return `This interval overlaps an existing entry (${row.depth_from}–${row.depth_to} m)`;
     }
   }
-  if (existingRows.length > 0) {
+  if (contiguous && existingRows.length > 0) {
     const lastEnd = Math.max(...existingRows.map((r) => r.depth_to));
     // Samples and tests are taken at intervals with drilling in between, so a
     // gap only means something is missing if that ground was never accounted
@@ -716,7 +724,7 @@ function resolveRunForDepth(boreholeId, depthFrom, depthTo) {
 // Checks that apply to any depth-interval record measured against the hole
 // itself: inside the borehole's drilled/planned range, and (for samples and
 // tests) covered by a drilling run.
-function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun } = {}) {
+function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun, exclude } = {}) {
   const bh = db.prepare('SELECT total_depth, planned_depth, code FROM boreholes WHERE id = ?').get(boreholeId);
   if (!bh) return 'Borehole not found';
   const from = Number(depthFrom);
@@ -738,7 +746,7 @@ function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun } 
     // the bit. The bottom includes earlier samples, since those advanced the
     // hole too. Anything else is either below the hole or inside a stretch
     // that was skipped rather than drilled.
-    const bottom = holeBottom(boreholeId).depth;
+    const bottom = holeBottom(boreholeId, exclude).depth;
     if (from > bottom + 1e-9) {
       return `The hole has only reached ${bottom} m. Record the drilling run that reaches ${from} m before adding this record.`;
     }
@@ -759,18 +767,24 @@ function validateAgainstBorehole(boreholeId, depthFrom, depthTo, { requireRun } 
 // starts where a run finished. Judging either chain on its own reports the
 // other's advance as a gap, which is why coverage is taken across all three
 // record types together.
-function intervalIsCovered(boreholeId, from, to) {
+function intervalIsCovered(boreholeId, from, to, exclude) {
   if (to <= from + 1e-9) return true;
   const spans = db
     .prepare(
       // Casing is excluded: it re-covers drilled ground, so counting it
       // would let a cased interval mask a stretch that was never drilled.
-      `SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing'
-       UNION ALL SELECT depth_from, depth_to FROM samples WHERE borehole_id = ?
-       UNION ALL SELECT depth_from, depth_to FROM tests WHERE borehole_id = ?
+      // The row being edited is excluded too, or it would cite its own
+      // pre-edit position as proof that the ground it is vacating was drilled.
+      `SELECT depth_from, depth_to FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing'${excludeClause('drilling_runs', exclude)}
+       UNION ALL SELECT depth_from, depth_to FROM samples WHERE borehole_id = ?${excludeClause('samples', exclude)}
+       UNION ALL SELECT depth_from, depth_to FROM tests WHERE borehole_id = ?${excludeClause('tests', exclude)}
        ORDER BY depth_from ASC`
     )
-    .all(boreholeId, boreholeId, boreholeId);
+    .all(
+      ...excludeArgs(boreholeId, 'drilling_runs', exclude),
+      ...excludeArgs(boreholeId, 'samples', exclude),
+      ...excludeArgs(boreholeId, 'tests', exclude)
+    );
   let covered = from;
   for (const s of spans) {
     if (s.depth_to <= covered + 1e-9) continue;
@@ -880,11 +894,26 @@ const RUN_FIELDS = [
 // The deepest point the hole has actually reached, across drilling runs and
 // anything driven below them. Reported with its source so the form can tell
 // the operator why the next run starts where it does.
-function holeBottom(boreholeId) {
+// `exclude` is {table, id} — a record being edited or deleted. Such a row must
+// not be allowed to vouch for its own position: when a sample driven below the
+// last drilling run was re-saved, it counted itself as the hole bottom, so its
+// own start depth was neither inside a run nor at the bottom, and the record
+// could never be edited again — not even with the byte-identical payload.
+function excludeClause(table, exclude) {
+  return exclude && exclude.table === table ? ' AND id != ?' : '';
+}
+function excludeArgs(boreholeId, table, exclude) {
+  return exclude && exclude.table === table ? [boreholeId, exclude.id] : [boreholeId];
+}
+
+function holeBottom(boreholeId, exclude) {
   // Casing never deepens the hole, so it cannot define the bottom.
-  const run = db.prepare("SELECT MAX(depth_to) AS d FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing'").get(boreholeId).d || 0;
-  const sample = db.prepare('SELECT MAX(depth_to) AS d FROM samples WHERE borehole_id = ?').get(boreholeId).d || 0;
-  const test = db.prepare('SELECT MAX(depth_to) AS d FROM tests WHERE borehole_id = ?').get(boreholeId).d || 0;
+  const run = db.prepare("SELECT MAX(depth_to) AS d FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing'" + excludeClause('drilling_runs', exclude))
+    .get(...excludeArgs(boreholeId, 'drilling_runs', exclude)).d || 0;
+  const sample = db.prepare('SELECT MAX(depth_to) AS d FROM samples WHERE borehole_id = ?' + excludeClause('samples', exclude))
+    .get(...excludeArgs(boreholeId, 'samples', exclude)).d || 0;
+  const test = db.prepare('SELECT MAX(depth_to) AS d FROM tests WHERE borehole_id = ?' + excludeClause('tests', exclude))
+    .get(...excludeArgs(boreholeId, 'tests', exclude)).d || 0;
   const depth = Math.max(run, sample, test);
   const source = depth === 0 ? 'start of hole' : sample >= run && sample >= test ? 'end of last sample' : test > run ? 'end of last test' : 'end of last drilling run';
   return { depth: Number(depth.toFixed(3)), source, drilled: run };
@@ -936,16 +965,20 @@ app.get('/api/boreholes/:boreholeId/next-run', (req, res) => {
   if (projectId === null) return notFound(res, 'Borehole');
   if (!canAccessProject(req.user, projectId)) return forbidden(res);
   const bh = db.prepare('SELECT * FROM boreholes WHERE id = ?').get(req.params.boreholeId);
+  // When an existing run is being edited it must not set the baseline it is
+  // measured against, or correcting its own start depth reads as a gap.
+  const exclude = req.query.exclude_run ? { table: 'drilling_runs', id: Number(req.query.exclude_run) } : undefined;
+  const excludeSql = exclude ? ' AND id != ?' : '';
   const last = db
-    .prepare("SELECT * FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing' ORDER BY depth_to DESC, id DESC LIMIT 1")
-    .get(req.params.boreholeId);
+    .prepare("SELECT * FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing'" + excludeSql + ' ORDER BY depth_to DESC, id DESC LIMIT 1')
+    .get(...(exclude ? [req.params.boreholeId, exclude.id] : [req.params.boreholeId]));
   const maxRunNo = db
     .prepare('SELECT MAX(run_number) AS n FROM drilling_runs WHERE borehole_id = ?')
     .get(req.params.boreholeId).n;
   // The hole bottom is the deepest point reached by anything — a sampler
   // driven below the last run advanced the hole, so drilling resumes from
   // where the sampler finished, not from where drilling stopped.
-  const bottom = holeBottom(req.params.boreholeId);
+  const bottom = holeBottom(req.params.boreholeId, exclude);
   res.json({
     run_number: (maxRunNo || 0) + 1,
     depth_from: bottom.depth,
@@ -975,7 +1008,15 @@ app.get('/api/boreholes/:boreholeId/next-interval', (req, res) => {
   const runs = db
     .prepare("SELECT * FROM drilling_runs WHERE borehole_id = ? AND COALESCE(run_type, 'Drilling') != 'Casing' ORDER BY depth_from ASC")
     .all(req.params.boreholeId);
-  const bottom = holeBottom(req.params.boreholeId);
+  // When an existing sample or test is being edited, it must not count toward
+  // the hole bottom it is measured against — otherwise the form validates the
+  // record against a depth only that record reached, which is the same
+  // self-reference that made such rows impossible to re-save.
+  const exclude =
+    req.query.exclude_sample ? { table: 'samples', id: Number(req.query.exclude_sample) }
+    : req.query.exclude_test ? { table: 'tests', id: Number(req.query.exclude_test) }
+    : undefined;
+  const bottom = holeBottom(req.params.boreholeId, exclude);
 
   // A sampler is driven from the bottom of the hole, so the next sample or
   // test starts exactly where the hole currently ends — not where the last
@@ -1228,15 +1269,22 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
     skipReason: skip_reason,
     existingRows,
     gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+    contiguous: false,
   });
   if (depthError) return res.status(400).json({ error: depthError });
   const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
   if (rangeError) return res.status(400).json({ error: rangeError });
-  const parsedSampleData = typeof sample_data === 'string' ? JSON.parse(sample_data || '{}') : sample_data || {};
+  let parsedSampleData;
+  try {
+    parsedSampleData = typeof sample_data === 'string' ? JSON.parse(sample_data || '{}') : sample_data || {};
+  } catch (_) {
+    return res.status(400).json({ error: 'Sample readings could not be read — the submitted data is not valid JSON.' });
+  }
   const dataError = validateSampleData(sample_type, parsedSampleData);
   if (dataError) return res.status(400).json({ error: dataError });
   const penError = validatePenetration(sample_type, req.body, depth_from, depth_to);
   if (penError) return res.status(400).json({ error: penError });
+  const derivedPost = deriveSampleValues(sample_type, parsedSampleData, req.body, depth_from, depth_to);
   const runId = resolveRunForDepth(req.params.boreholeId, depth_from, depth_to);
   const approvedAt = supervisor_name ? new Date().toISOString() : null;
   const info = db
@@ -1253,8 +1301,8 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
       depth_from,
       depth_to,
       sample_type || null,
-      spt_n_value ?? null,
-      recovery_pct ?? null,
+      derivedPost.spt_n_value,
+      derivedPost.recovery_pct,
       lab_status || 'Pending',
       notes || null,
       skip_reason || null,
@@ -1274,6 +1322,26 @@ app.post('/api/boreholes/:boreholeId/samples', writeRoles, (req, res) => {
   const sample = db.prepare('SELECT * FROM samples WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(parseSampleRow(sample));
 });
+
+// N and recovery are calculated from the readings, so the server computes them
+// rather than storing whatever the client sent. The drilling run's penetration
+// rate has worked this way from the start; these two were the only derived
+// figures still taken on trust, which let an edited sample keep an N-value its
+// own blow counts no longer supported. A client value is used only where the
+// readings cannot produce one (a lab-supplied recovery, say), never over one.
+function deriveSampleValues(sampleType, data, body, from, to) {
+  const d = data || {};
+  const derivedN = derive.sptNValue(d.blows_150_300, d.blows_300_450);
+  const penetration =
+    derive.blankToNull(d.penetration_length_mm) ??
+    derive.blankToNull(body.penetration_achieved_mm) ??
+    (Number.isFinite(Number(to) - Number(from)) ? (Number(to) - Number(from)) * 1000 : null);
+  const derivedRecovery = derive.recoveryPct(d.recovery_length_mm, penetration);
+  return {
+    spt_n_value: String(sampleType) === 'SPT' ? derivedN ?? derive.blankToNull(body.spt_n_value) : derive.blankToNull(body.spt_n_value),
+    recovery_pct: derivedRecovery ?? derive.blankToNull(body.recovery_pct),
+  };
+}
 
 app.put('/api/samples/:id', writeRoles, (req, res) => {
   const existing = db.prepare('SELECT * FROM samples WHERE id = ?').get(req.params.id);
@@ -1298,6 +1366,9 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
   } = req.body;
   const newFrom = depth_from ?? existing.depth_from;
   const newTo = depth_to ?? existing.depth_to;
+  // The row being edited is excluded from every coverage question it is asked,
+  // or it vouches for its own position and can never be re-saved.
+  const exclude = { table: 'samples', id: Number(req.params.id) };
   const otherRows = db
     .prepare('SELECT depth_from, depth_to FROM samples WHERE borehole_id = ? AND id != ?')
     .all(existing.borehole_id, req.params.id);
@@ -1306,23 +1377,35 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     depthTo: newTo,
     skipReason: skip_reason ?? existing.skip_reason,
     existingRows: otherRows,
-    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b),
+    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b, exclude),
+    contiguous: false,
   });
   if (depthError) return res.status(400).json({ error: depthError });
-  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });
+  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true, exclude });
   if (rangeError) return res.status(400).json({ error: rangeError });
   const newSampleType = sample_type ?? existing.sample_type;
   const penError = validatePenetration(newSampleType, { ...existing, ...req.body }, newFrom, newTo);
   if (penError) return res.status(400).json({ error: penError });
-  const parsedSampleData =
-    sample_data !== undefined
-      ? typeof sample_data === 'string'
-        ? JSON.parse(sample_data || '{}')
-        : sample_data || {}
-      : JSON.parse(existing.sample_data || '{}');
+  let parsedSampleData;
+  try {
+    parsedSampleData =
+      sample_data !== undefined
+        ? typeof sample_data === 'string'
+          ? JSON.parse(sample_data || '{}')
+          : sample_data || {}
+        : JSON.parse(existing.sample_data || '{}');
+  } catch (_) {
+    // Malformed JSON from a client is a bad request, not a crash. Letting it
+    // throw returned a 500 with a stack trace and absolute server paths.
+    return res.status(400).json({ error: 'Sample readings could not be read — the submitted data is not valid JSON.' });
+  }
   const dataError = validateSampleData(newSampleType, parsedSampleData);
   if (dataError) return res.status(400).json({ error: dataError });
-  const approvedAt = supervisor_name ? existing.approved_at || new Date().toISOString() : null;
+  const derivedPut = deriveSampleValues(newSampleType, parsedSampleData, { ...existing, ...req.body }, newFrom, newTo);
+  // Sign-off follows the supervisor the record will actually have, not just
+  // the one in this request — omitting the field must not revoke the approval.
+  const newSupervisor = supervisor_name ?? existing.supervisor_name;
+  const approvedAt = newSupervisor ? existing.approved_at || new Date().toISOString() : null;
   db.prepare(
     `UPDATE samples SET depth = ?, depth_from = ?, depth_to = ?, sample_type = ?, spt_n_value = ?, recovery_pct = ?,
       lab_status = ?, notes = ?, skip_reason = ?, sample_ref = ?, date = ?, time = ?, operator_name = ?,
@@ -1334,19 +1417,23 @@ app.put('/api/samples/:id', writeRoles, (req, res) => {
     newFrom,
     newTo,
     newSampleType,
-    spt_n_value ?? null,
-    recovery_pct ?? null,
+    // A field the client did not send keeps its stored value. Defaulting to
+    // NULL meant any partial edit — including one sent by a script or a form
+    // that renders a subset of the fields — silently erased notes, lab status,
+    // sign-off and the readings that were not on screen.
+    derivedPut.spt_n_value,
+    derivedPut.recovery_pct,
     lab_status ?? existing.lab_status,
-    notes ?? null,
-    skip_reason ?? null,
-    sample_ref ?? null,
-    date ?? null,
-    time ?? null,
-    operator_name ?? null,
-    supervisor_name ?? null,
+    notes ?? existing.notes,
+    skip_reason ?? existing.skip_reason,
+    sample_ref ?? existing.sample_ref,
+    date ?? existing.date,
+    time ?? existing.time,
+    operator_name ?? existing.operator_name,
+    newSupervisor,
     approvedAt,
-    groundwater_obs ?? null,
-    description ?? null,
+    groundwater_obs ?? existing.groundwater_obs,
+    description ?? existing.description,
     sample_data !== undefined ? toJsonText(sample_data) : existing.sample_data,
     resolveRunForDepth(existing.borehole_id, newFrom, newTo),
     req.body.penetration_achieved_mm ?? existing.penetration_achieved_mm ?? null,
@@ -1429,6 +1516,7 @@ app.post('/api/boreholes/:boreholeId/tests', writeRoles, (req, res) => {
   const validationError = validateDepthInterval({
     depthFrom: depth_from, depthTo: depth_to, skipReason: skip_reason, existingRows,
     gapIsDrilled: (a, b) => intervalIsCovered(req.params.boreholeId, a, b),
+    contiguous: false,
   });
   if (validationError) return res.status(400).json({ error: validationError });
   const rangeError = validateAgainstBorehole(req.params.boreholeId, depth_from, depth_to, { requireRun: true });
@@ -1480,6 +1568,8 @@ app.put('/api/tests/:id', writeRoles, (req, res) => {
   } = req.body;
   const newFrom = depth_from ?? existing.depth_from;
   const newTo = depth_to ?? existing.depth_to;
+  // As on samples: the row being edited must not vouch for its own position.
+  const exclude = { table: 'tests', id: Number(req.params.id) };
   const otherRows = db
     .prepare('SELECT depth_from, depth_to FROM tests WHERE borehole_id = ? AND id != ?')
     .all(existing.borehole_id, req.params.id);
@@ -1488,29 +1578,33 @@ app.put('/api/tests/:id', writeRoles, (req, res) => {
     depthTo: newTo,
     skipReason: skip_reason ?? existing.skip_reason,
     existingRows: otherRows,
-    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b),
+    gapIsDrilled: (a, b) => intervalIsCovered(existing.borehole_id, a, b, exclude),
+    contiguous: false,
   });
   if (validationError) return res.status(400).json({ error: validationError });
-  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true });
+  const rangeError = validateAgainstBorehole(existing.borehole_id, newFrom, newTo, { requireRun: true, exclude });
   if (rangeError) return res.status(400).json({ error: rangeError });
-  const approvedAt = supervisor_name ? existing.approved_at || new Date().toISOString() : null;
+  const newSupervisor = supervisor_name ?? existing.supervisor_name;
+  const approvedAt = newSupervisor ? existing.approved_at || new Date().toISOString() : null;
   db.prepare(
     `UPDATE tests SET test_type = ?, date = ?, depth_from = ?, depth_to = ?, result_value = ?,
       result_unit = ?, conducted_by = ?, notes = ?, test_data = ?, skip_reason = ?, test_ref = ?,
       supervisor_name = ?, approved_at = ?, run_id = ? WHERE id = ?`
   ).run(
     test_type ?? existing.test_type,
-    date ?? null,
+    // As on samples: an omitted field keeps its stored value rather than being
+    // erased, so a partial edit cannot destroy the rest of the record.
+    date ?? existing.date,
     newFrom,
     newTo,
-    result_value ?? null,
-    result_unit ?? null,
-    conducted_by ?? null,
-    notes ?? null,
+    result_value ?? existing.result_value,
+    result_unit ?? existing.result_unit,
+    conducted_by ?? existing.conducted_by,
+    notes ?? existing.notes,
     test_data !== undefined ? toJsonText(test_data) : existing.test_data,
-    skip_reason ?? null,
-    test_ref ?? null,
-    supervisor_name ?? null,
+    skip_reason ?? existing.skip_reason,
+    test_ref ?? existing.test_ref,
+    newSupervisor,
     approvedAt,
     resolveRunForDepth(existing.borehole_id, newFrom, newTo),
     req.params.id

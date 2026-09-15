@@ -254,6 +254,70 @@ async function main() {
   check('no run without RQD is classified', runsNow.every((r) => (r.rqd_pct === null || r.rqd_pct === undefined) === (r.rqd_classification === null)),
     `${runsNow.filter((r) => r.rqd_classification === null).length} unclassified`);
 
+  // ---------- Editing a sample taken at an interval ----------
+  // Reported: editing a Shelby at 3.45–3.9 m demanded a "Reason for Skipped
+  // Interval" and would not save. The form derived "continues from" out of the
+  // OTHER SAMPLES, so the normal gap between two samples read as a skipped
+  // stretch — a rule that exists nowhere on the server and nowhere in the
+  // ground. Samples are taken at intervals; the drilling runs account for what
+  // is between them.
+  console.log('\nA sample is taken at an interval, not in a chain');
+  const bhS = (await call('POST', `/api/projects/${project.id}/boreholes`, {
+    code: 'WF-BH03', total_depth: 30, planned_depth: 30, status: 'In Progress',
+  })).data;
+  await call('POST', `/api/boreholes/${bhS.id}/runs`, { run_number: 1, depth_from: 0, depth_to: 2, date: '2026-08-04', drilling_time_min: 60 });
+  await call('POST', `/api/boreholes/${bhS.id}/samples`, {
+    sample_type: 'SPT', sample_ref: 'WF-SPT-A', depth_from: 2, depth_to: 2.45,
+    penetration_achieved_mm: 450, date: '2026-08-04',
+    sample_data: { seating_blows: 5, blows_150_300: 8, blows_300_450: 11 },
+  });
+  await call('POST', `/api/boreholes/${bhS.id}/runs`, { run_number: 2, depth_from: 2.45, depth_to: 3.45, date: '2026-08-04', drilling_time_min: 45 });
+  const shelby = await call('POST', `/api/boreholes/${bhS.id}/samples`, {
+    sample_type: 'Shelby', sample_ref: 'WF-SHELBY', depth_from: 3.45, depth_to: 3.9,
+    date: '2026-08-04', notes: 'original note', supervisor_name: 'Sup One',
+    sample_data: { tube_length_mm: 600, penetration_length_mm: 450, recovery_length_mm: 400 },
+  });
+  check('a Shelby driven from the hole bottom is accepted', shelby.status === 201,
+    shelby.status === 201 ? '3.45–3.9 m' : shelby.data.error);
+
+  // What the edit form asks for. It must measure against the hole, excluding
+  // the record being edited — not against the previous sample.
+  const editCtx = (await call('GET', `/api/boreholes/${bhS.id}/next-interval?kind=sample&exclude_sample=${shelby.data.id}`)).data;
+  check('the edit baseline is the hole bottom, not the last sample', near(editCtx.hole_bottom, 3.45),
+    `${editCtx.hole_bottom} m — reading the previous SAMPLE gave 2.45 m and demanded a skip reason`);
+  check('so the sample start is not a gap', !(3.45 > editCtx.hole_bottom + 1e-9));
+
+  // A record driven below the last run counted itself as the hole bottom, so
+  // its own start was neither in a run nor at the bottom: unsavable forever.
+  const resave = await call('PUT', `/api/samples/${shelby.data.id}`, {
+    depth_from: 3.45, depth_to: 3.9, sample_type: 'Shelby', sample_ref: 'WF-SHELBY',
+  });
+  check('an unchanged bottom-of-hole sample can be re-saved', resave.status === 200,
+    resave.status === 200 ? 'no self-reference' : resave.data.error);
+
+  const partial = await call('PUT', `/api/samples/${shelby.data.id}`, { lab_status: 'Complete' });
+  const reread = (await call('GET', `/api/boreholes/${bhS.id}/samples`)).data.find((s) => s.id === shelby.data.id);
+  check('a partial edit keeps the fields it did not send', partial.status === 200 && reread.notes === 'original note' && !!reread.approved_at,
+    `notes ${JSON.stringify(reread.notes)}, sign-off ${reread.approved_at ? 'kept' : 'LOST'}`);
+  check('readings survive a partial edit', !!(reread.sample_data && reread.sample_data.recovery_length_mm),
+    JSON.stringify(reread.sample_data));
+
+  // Derived figures belong to the server, as the run's penetration rate does.
+  const lied = await call('PUT', `/api/samples/${shelby.data.id}`, {
+    sample_data: { tube_length_mm: 600, penetration_length_mm: 450, recovery_length_mm: 400 }, recovery_pct: 999,
+  });
+  check('a client-supplied recovery % is ignored', lied.status === 200 && near(lied.data.recovery_pct, 88.9, 0.15),
+    `stored ${lied.data && lied.data.recovery_pct}% (400/450), client sent 999`);
+
+  // The real rule still holds, and now says so in terms of the hole.
+  const belowHole = await call('PUT', `/api/samples/${shelby.data.id}`, { depth_from: 9, depth_to: 9.45 });
+  check('a sample below the hole bottom is still refused', belowHole.status === 400 && /only reached/i.test(belowHole.data.error || ''),
+    belowHole.data && String(belowHole.data.error).slice(0, 62));
+
+  const badJson = await call('PUT', `/api/samples/${shelby.data.id}`, { sample_data: '{not json' });
+  check('malformed readings are a 400, not a stack trace', badJson.status === 400 && !/\bat \w+ \(/.test(JSON.stringify(badJson.data)),
+    badJson.data && String(badJson.data.error).slice(0, 52));
+
   // ---------- An undated run cannot be charted, so it cannot be saved ----------
   // Every chart on the analytics page is keyed by date. A run saved without
   // one still counted toward metres drilled but sat on no day, so the
@@ -278,8 +342,8 @@ async function main() {
   });
   const proj = (await call('GET', `/api/analytics?project_id=${project.id}`)).data;
   const projLast = proj.production.daily[proj.production.daily.length - 1];
-  check('a second hole from surface adds its full depth', near(proj.headline.total_metres, 26, 0.02),
-    `${proj.headline.total_metres} m — 18 m in BH01 + 8 m in BH02, not merged at surface`);
+  check('a second hole from surface adds its full depth', near(proj.headline.total_metres, 29.9, 0.02),
+    `${proj.headline.total_metres} m — 18 m in BH01 + 3.9 m in BH03 + 8 m in BH02, not merged at surface`);
   check('the project cumulative matches the project total', projLast && near(projLast.cumulative, proj.headline.total_metres, 0.02),
     `headline ${proj.headline.total_metres} m vs chart ${projLast && projLast.cumulative} m`);
 
