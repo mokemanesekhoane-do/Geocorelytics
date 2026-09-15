@@ -63,17 +63,24 @@ const OPERATORS = ['T. Mokoena', 'S. van Wyk', 'P. Ndlovu'];
 const HELPERS = ['J. Dlamini', 'M. Botha', 'K. Sithole'];
 const SHIFTS = ['Day', 'Night'];
 
+// Four horizons, logged the way a site investigation in this geology reads:
+// a thin organic cover, a cohesive residual layer, a weathering transition,
+// then competent rock. Sampling method follows the horizon — SPT and Shelby
+// belong in the soils, core recovery and RQD only start to mean something
+// once the bit is in rock.
 const SOIL_PROFILE = [
-  { to: 1.2, type: 'Topsoil', colour: 'Dark Brown', uscs: 'ML - Silt (low plasticity)', consistency: 'Soft', moisture: 'Moist' },
-  { to: 4.5, type: 'Clay', colour: 'Reddish Brown', uscs: 'CL - Lean clay', consistency: 'Firm', moisture: 'Moist' },
-  { to: 9.0, type: 'Silty Sand', colour: 'Yellowish Brown', uscs: 'SM - Silty sand', consistency: 'Medium Dense', moisture: 'Very Moist' },
-  { to: 14.0, type: 'Residual Soil', colour: 'Mottled', uscs: 'SC - Clayey sand', consistency: 'Stiff', moisture: 'Wet' },
-  { to: 100, type: 'Weathered Rock', colour: 'Grey', uscs: 'GC - Clayey gravel', consistency: 'Very Stiff', moisture: 'Saturated' },
+  { to: 3.0, type: 'Topsoil', colour: 'Dark Brown', uscs: 'ML - Silt (low plasticity)', consistency: 'Soft', moisture: 'Moist' },
+  { to: 8.0, type: 'Sandy Clay', colour: 'Reddish Brown', uscs: 'CL - Lean clay with sand', consistency: 'Firm', moisture: 'Moist' },
+  { to: 16.0, type: 'Weathered Rock', colour: 'Mottled Yellow-Grey', uscs: 'GC - Clayey gravel (weathered)', consistency: 'Very Stiff', moisture: 'Wet' },
+  { to: 100, type: 'Rock', colour: 'Grey', uscs: 'Sandstone - slightly weathered', consistency: 'Hard', moisture: 'Saturated' },
 ];
 
 function layerAt(depth) {
   return SOIL_PROFILE.find((l) => depth <= l.to) || SOIL_PROFILE[SOIL_PROFILE.length - 1];
 }
+
+// RQD and core recovery are only recorded where the bit is actually coring.
+const isRockLayer = (layer) => layer.type === 'Rock' || layer.type === 'Weathered Rock';
 
 const addDays = (iso, n) => new Date(Date.parse(iso) + n * 86400000).toISOString().slice(0, 10);
 
@@ -106,7 +113,7 @@ async function seedBorehole(projectId, spec) {
     const from = round(depth);
     const to = round(depth + advance);
     const layer = layerAt(to);
-    const isRock = layer.type === 'Weathered Rock';
+    const isRock = isRockLayer(layer);
 
     // Recovery and rate degrade in the transition zone, which is what the
     // analytics should later surface as a recommendation.
@@ -170,8 +177,11 @@ async function seedBorehole(projectId, spec) {
   let n = 0;
   while (sampleFrom + 0.45 <= spec.drilledTo) {
     const layer = layerAt(sampleFrom);
-    const cohesive = ['Clay', 'Residual Soil'].includes(layer.type);
-    const type = n % 5 === 4 && cohesive ? 'UDS' : n % 3 === 2 && cohesive ? 'Shelby' : 'SPT';
+    // Shelby needs cohesive soil to hold a tube; UDS is taken as a core
+    // sample once the hole is into weathered rock. Everything else is SPT.
+    const cohesive = layer.type === 'Sandy Clay';
+    const inRock = isRockLayer(layer);
+    const type = inRock ? (n % 3 === 1 ? 'UDS' : 'SPT') : cohesive && n % 2 === 1 ? 'Shelby' : n % 5 === 4 ? 'UDS' : 'SPT';
     const to = round(sampleFrom + (type === 'SPT' ? 0.45 : 0.6));
     if (to > spec.drilledTo) break;
 
@@ -326,6 +336,15 @@ async function main() {
         { code: 'BH-01', easting: 29.3841, northing: -28.3712, elevation: 1642.5, drilledTo: 24.5, plannedDepth: 25, start: '2026-07-06', plannedDays: 6, status: 'Complete', runLengths: [3.0, 3.0, 2.5, 3.5], firstSampleAt: 1.0, sampleGap: 1.05, rig: RIGS[0], operator: OPERATORS[0], poorZone: [11, 15], tests: [{ type: 'Falling Head Test', from: 8.0, to: 9.0, result: 0.000042 }, { type: 'Packer Test', from: 17.5, to: 20.5, result: 3.8 }] },
         { code: 'BH-02', easting: 29.3856, northing: -28.3729, elevation: 1639.8, drilledTo: 18.2, plannedDepth: 22, start: '2026-07-09', plannedDays: 5, status: 'In Progress', runLengths: [2.6, 3.2, 2.8], firstSampleAt: 1.5, sampleGap: 1.2, rig: RIGS[1], operator: OPERATORS[1], tests: [{ type: 'Falling Head Test', from: 10.0, to: 11.0, result: 0.000018 }] },
         { code: 'BH-03', easting: 29.3868, northing: -28.3741, elevation: 1644.1, drilledTo: 9.6, plannedDepth: 20, start: '2026-07-13', plannedDays: 5, status: 'In Progress', runLengths: [2.4, 3.6], firstSampleAt: 1.2, sampleGap: 1.4, rig: RIGS[0], operator: OPERATORS[2], tests: [] },
+        // The deep pier hole. Carried to 45 m so the full profile — topsoil,
+        // sandy clay, weathering transition and competent rock — is present in
+        // one borehole, with RQD across the whole cored section.
+        { code: 'BH-04', easting: 29.3879, northing: -28.3756, elevation: 1640.3, drilledTo: 45.0, plannedDepth: 45, start: '2026-07-15', plannedDays: 9, status: 'Complete', runLengths: [3.0, 3.0, 2.5, 3.0, 3.5], firstSampleAt: 1.0, sampleGap: 1.6, rig: RIGS[1], operator: OPERATORS[0], poorZone: [21, 25],
+          tests: [
+            { type: 'Falling Head Test', from: 6.0, to: 7.0, result: 0.000064 },
+            { type: 'Packer Test', from: 24.0, to: 27.0, result: 5.2 },
+            { type: 'Packer Test', from: 36.0, to: 39.0, result: 1.4 },
+          ] },
       ],
     },
     {
@@ -336,8 +355,25 @@ async function main() {
       status: 'Active',
       notes: 'Stability investigation for the raised TSF embankment.',
       boreholes: [
-        { code: 'TSF-BH01', easting: 27.2412, northing: -25.6673, elevation: 1156.2, drilledTo: 15.4, plannedDepth: 15, start: '2026-07-20', plannedDays: 4, status: 'Complete', runLengths: [2.2, 2.8, 3.4], firstSampleAt: 0.8, sampleGap: 1.1, rig: RIGS[1], operator: OPERATORS[1], tests: [{ type: 'Falling Head Test', from: 6.5, to: 7.5, result: 0.00021 }] },
+        { code: 'TSF-BH01', easting: 27.2412, northing: -25.6673, elevation: 1156.2, drilledTo: 15.4, plannedDepth: 16, start: '2026-07-20', plannedDays: 4, status: 'Complete', runLengths: [2.2, 2.8, 3.4], firstSampleAt: 0.8, sampleGap: 1.1, rig: RIGS[1], operator: OPERATORS[1], tests: [{ type: 'Falling Head Test', from: 6.5, to: 7.5, result: 0.00021 }] },
         { code: 'TSF-BH02', easting: 27.2438, northing: -25.6691, elevation: 1154.7, drilledTo: 12.0, plannedDepth: 15, start: '2026-07-23', plannedDays: 4, status: 'In Progress', runLengths: [3.0, 2.5, 3.5], firstSampleAt: 1.0, sampleGap: 1.6, rig: RIGS[0], operator: OPERATORS[2], poorZone: [7, 10], tests: [] },
+        { code: 'TSF-BH03', easting: 27.2455, northing: -25.6708, elevation: 1153.1, drilledTo: 28.6, plannedDepth: 30, start: '2026-07-27', plannedDays: 6, status: 'In Progress', runLengths: [2.8, 3.2, 3.0], firstSampleAt: 1.2, sampleGap: 1.5, rig: RIGS[1], operator: OPERATORS[0],
+          tests: [{ type: 'Packer Test', from: 19.0, to: 22.0, result: 7.6 }] },
+      ],
+    },
+    {
+      name: 'Mogalakwena Haul Road Realignment — Subgrade Investigation',
+      client: 'Anglo American Platinum',
+      location: 'Mokopane, Limpopo',
+      start_date: '2026-08-03',
+      status: 'Active',
+      notes: 'Subgrade and cut-slope investigation along the realigned haul road corridor.',
+      boreholes: [
+        { code: 'HR-BH01', easting: 28.9967, northing: -24.1284, elevation: 1082.4, drilledTo: 12.8, plannedDepth: 13, start: '2026-08-03', plannedDays: 3, status: 'Complete', runLengths: [2.4, 3.0, 2.6], firstSampleAt: 0.9, sampleGap: 1.0, rig: RIGS[0], operator: OPERATORS[1],
+          tests: [{ type: 'Falling Head Test', from: 5.0, to: 6.0, result: 0.00015 }] },
+        { code: 'HR-BH02', easting: 28.9981, northing: -24.1301, elevation: 1080.9, drilledTo: 20.4, plannedDepth: 21, start: '2026-08-06', plannedDays: 4, status: 'Complete', runLengths: [3.0, 2.8, 3.4], firstSampleAt: 1.1, sampleGap: 1.3, rig: RIGS[1], operator: OPERATORS[2], poorZone: [13, 16],
+          tests: [{ type: 'Packer Test', from: 16.5, to: 19.5, result: 2.9 }] },
+        { code: 'HR-BH03', easting: 28.9994, northing: -24.1318, elevation: 1079.2, drilledTo: 6.4, plannedDepth: 18, start: '2026-08-11', plannedDays: 4, status: 'In Progress', runLengths: [2.2, 2.0, 2.2], firstSampleAt: 1.0, sampleGap: 1.2, rig: RIGS[0], operator: OPERATORS[0], tests: [] },
       ],
     },
   ];

@@ -930,7 +930,10 @@ function wireTestModal(form, lastEnd, context, existing) {
 const SAMPLE_TYPES = {
   SPT: {
     resultLabel: 'N-Value',
-    formulaNote: 'N = blows for 2nd 150 mm + blows for 3rd 150 mm (seating and 1st increment excluded, per ASTM D1586)',
+    // Left over from the old three-increment-after-seating layout. The fields
+    // directly beneath it are Seating (0-150), 1st (150-300) and 2nd (300-450),
+    // so describing a "3rd 150 mm" contradicted the form on screen.
+    formulaNote: 'N = 1st Blows (150–300 mm) + 2nd Blows (300–450 mm). The seating drive is discarded, per ASTM D1586.',
     fields: [
       // Equipment — standard catalogues, so dropdowns.
       { name: 'sampler_type', label: 'Sampler Type', lookup: 'sampler_type' },
