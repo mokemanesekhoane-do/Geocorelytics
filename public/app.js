@@ -1345,7 +1345,7 @@ async function boot() {
   } catch (err) {
     showAuth(`
       <div class="auth-card">
-        <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
+        <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo-white.png" alt="GeoCorelytics" /></div>
         <h2>Can't reach the server</h2>
         <p class="auth-subtitle">GeoCorelytics couldn't connect to its backend. Make sure the server is running (<code>npm start</code>), then reload this page.</p>
         <button type="button" class="primary" style="width:100%;padding:11px;" onclick="location.reload()">Retry</button>
@@ -1414,7 +1414,7 @@ function wireMobileNav() {
 function showLoginScreen(errorMsg) {
   showAuth(`
     <div class="auth-card">
-      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
+      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo-white.png" alt="GeoCorelytics" /></div>
       <h2>Sign in</h2>
       <p class="auth-subtitle">Geotechnical drilling management system</p>
       ${errorMsg ? `<div class="auth-error">${esc(errorMsg)}</div>` : ''}
@@ -1443,7 +1443,7 @@ function showLoginScreen(errorMsg) {
 function showSetupScreen(errorMsg) {
   showAuth(`
     <div class="auth-card">
-      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo.png" alt="GeoCorelytics" /></div>
+      <div class="brand"><img class="brand-logo" src="assets/geocorelytics-logo-white.png" alt="GeoCorelytics" /></div>
       <h2>Create Admin Account</h2>
       <p class="auth-subtitle">First-time setup &mdash; this account will have full Admin access</p>
       ${errorMsg ? `<div class="auth-error">${esc(errorMsg)}</div>` : ''}
@@ -3608,7 +3608,12 @@ async function renderProjectReport(id) {
 
   appEl.innerHTML = `
     <div class="report-letterhead">
-      <img src="assets/logo.png" alt="Mokay Group of Companies" />
+      <!-- The report is read on a dark screen but printed on white paper, so
+           both variants ship and CSS picks the right one. The coloured mark's
+           navy lettering sits at 1.1:1 on the app background; the white one
+           would be invisible on the page. -->
+      <img class="logo-screen" src="assets/logo-white.png" alt="Mokay Group of Companies" />
+      <img class="logo-print" src="assets/logo.png" alt="" aria-hidden="true" />
       <span class="subtitle">Mokay Group of Companies</span>
     </div>
 

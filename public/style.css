@@ -141,7 +141,12 @@ body::before {
   border-bottom: 2px solid var(--border);
 }
 
+/* width:auto throughout, so a logo can never be stretched out of ratio. */
 .report-letterhead img { height: 48px; width: auto; }
+
+/* Screen shows the white mark on the dark theme; print swaps to the coloured
+   one for white paper. Toggled in the print block at the end of this file. */
+.logo-print { display: none; }
 
 .nav-section-label {
   font-size: 0.7rem;
@@ -900,6 +905,10 @@ textarea { resize: vertical; min-height: 60px; }
   .main-col { width: 100%; }
   .panel, .stat-card, .chart-card, .report-borehole { border-color: #c8d0da; }
   table { border-color: #c8d0da; }
+
+  /* White-on-white would print blank, so the coloured mark takes over. */
+  .logo-screen { display: none !important; }
+  .logo-print { display: block !important; }
 }
 
 /* ---------- Field quick-capture dashboard ---------- */
